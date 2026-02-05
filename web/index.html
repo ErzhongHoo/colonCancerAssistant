@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>结直肠病例助手 MVP</title>
+    <style>
+      :root {
+        --bg: #f4f6fb;
+        --panel: #ffffff;
+        --border: #d9e1ef;
+        --text: #17233d;
+        --muted: #5e6c84;
+        --primary: #0f6fff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: radial-gradient(circle at top, #ecf3ff, var(--bg) 50%);
+        color: var(--text);
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: 320px 1fr;
+        height: 100vh;
+      }
+      .side, .main {
+        padding: 20px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 16px;
+      }
+      .side .card + .card { margin-top: 14px; }
+      h1 { font-size: 18px; margin: 0 0 14px; }
+      .muted { color: var(--muted); font-size: 13px; }
+      #upload-btn, #send-btn {
+        background: var(--primary);
+        color: #fff;
+        border: 0;
+        padding: 10px 14px;
+        border-radius: 10px;
+        cursor: pointer;
+      }
+      #upload-btn { width: 100%; margin-top: 10px; }
+      #files-list, #sources-list {
+        margin: 8px 0 0;
+        padding-left: 16px;
+        font-size: 13px;
+      }
+      .main {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      #chat-box {
+        flex: 1;
+        overflow-y: auto;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 18px;
+      }
+      .msg {
+        max-width: 80%;
+        padding: 12px 14px;
+        margin-bottom: 12px;
+        border-radius: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+      .user { background: #dceaff; margin-left: auto; }
+      .assistant { background: #eef2f9; }
+      .composer {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+      }
+      #message {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        font-size: 14px;
+      }
+      @media (max-width: 900px) {
+        .layout { grid-template-columns: 1fr; height: auto; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="side">
+        <div class="card">
+          <h1>病例上传</h1>
+          <div class="muted">支持 PDF / 图片 / txt。上传后自动构建检索库。</div>
+          <input id="file-input" type="file" multiple />
+          <button id="upload-btn">上传并入库</button>
+          <ul id="files-list"></ul>
+        </div>
+        <div class="card">
+          <h1>引用片段</h1>
+          <ul id="sources-list"></ul>
+        </div>
+      </aside>
+      <main class="main">
+        <div id="chat-box"></div>
+        <div class="composer">
+          <input id="message" placeholder="输入问题，例如：这份报告提示几期？下一步怎么做？" />
+          <button id="send-btn">发送</button>
+        </div>
+      </main>
+    </div>
+    <script>
+      const history = [];
+      const chatBox = document.getElementById("chat-box");
+      const sourcesList = document.getElementById("sources-list");
+      const filesList = document.getElementById("files-list");
+
+      function renderMessage(role, text) {
+        const div = document.createElement("div");
+        div.className = `msg ${role}`;
+        div.textContent = text;
+        chatBox.appendChild(div);
+        chatBox.scrollTop = chatBox.scrollHeight;
+      }
+
+      async function uploadFiles() {
+        const input = document.getElementById("file-input");
+        if (!input.files.length) return;
+        const form = new FormData();
+        Array.from(input.files).forEach((f) => form.append("files", f));
+        const res = await fetch("/api/upload", { method: "POST", body: form });
+        const data = await res.json();
+        filesList.innerHTML = "";
+        (data.results || []).forEach((item) => {
+          const li = document.createElement("li");
+          li.textContent = `${item.file}（${item.chunks} chunks）`;
+          filesList.appendChild(li);
+        });
+      }
+
+      async function sendMessage() {
+        const input = document.getElementById("message");
+        const text = input.value.trim();
+        if (!text) return;
+        renderMessage("user", text);
+        input.value = "";
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text, history }),
+        });
+        const data = await res.json();
+        renderMessage("assistant", data.answer || "出错了，请稍后再试。");
+        history.push({ role: "user", content: text });
+        history.push({ role: "assistant", content: data.answer || "" });
+        sourcesList.innerHTML = "";
+        (data.sources || []).forEach((s) => {
+          const li = document.createElement("li");
+          li.textContent = `${s.source}: ${s.preview}`;
+          sourcesList.appendChild(li);
+        });
+      }
+
+      document.getElementById("upload-btn").addEventListener("click", uploadFiles);
+      document.getElementById("send-btn").addEventListener("click", sendMessage);
+      document.getElementById("message").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") sendMessage();
+      });
+
+      renderMessage("assistant", "你好，我可以基于你上传的病例/检查报告做科普解释，并给出下一步治疗路径建议。");
+    </script>
+  </body>
+</html>
