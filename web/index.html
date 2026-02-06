@@ -45,6 +45,10 @@
         border-radius: 10px;
         cursor: pointer;
       }
+      #upload-btn:disabled, #send-btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
       #upload-btn { width: 100%; margin-top: 10px; }
       #files-list, #sources-list {
         margin: 8px 0 0;
@@ -71,6 +75,48 @@
         border-radius: 12px;
         line-height: 1.5;
         white-space: pre-wrap;
+      }
+      .msg p { margin: 0 0 8px; }
+      .msg p:last-child { margin-bottom: 0; }
+      .msg h1, .msg h2, .msg h3 { margin: 8px 0; }
+      .msg ul { margin: 6px 0 6px 20px; padding: 0; }
+      .msg code {
+        background: #e7ecf6;
+        padding: 1px 5px;
+        border-radius: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .msg pre {
+        margin: 8px 0;
+        background: #111827;
+        color: #e5e7eb;
+        border-radius: 10px;
+        padding: 10px;
+        overflow-x: auto;
+      }
+      .msg pre code {
+        background: transparent;
+        padding: 0;
+        color: inherit;
+      }
+      .msg hr {
+        border: 0;
+        border-top: 1px solid #cfd8e8;
+        margin: 10px 0;
+      }
+      .msg table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 8px 0;
+        font-size: 13px;
+      }
+      .msg th, .msg td {
+        border: 1px solid #d9e1ef;
+        padding: 6px 8px;
+        text-align: left;
+      }
+      .msg th {
+        background: #eef3ff;
       }
       .user { background: #dceaff; margin-left: auto; }
       .assistant { background: #eef2f9; }
@@ -118,51 +164,149 @@
       const chatBox = document.getElementById("chat-box");
       const sourcesList = document.getElementById("sources-list");
       const filesList = document.getElementById("files-list");
+      const uploadBtn = document.getElementById("upload-btn");
+      const sendBtn = document.getElementById("send-btn");
 
       function renderMessage(role, text) {
         const div = document.createElement("div");
         div.className = `msg ${role}`;
-        div.textContent = text;
+        if (role === "assistant") {
+          div.innerHTML = renderMarkdown(text);
+        } else {
+          div.textContent = text;
+        }
         chatBox.appendChild(div);
         chatBox.scrollTop = chatBox.scrollHeight;
+      }
+
+      function escapeHtml(raw) {
+        return raw
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function renderMarkdown(md) {
+        let safe = escapeHtml(md || "");
+
+        const codeBlocks = [];
+        safe = safe.replace(/```([\s\S]*?)```/g, (_, code) => {
+          const token = `__CODE_BLOCK_${codeBlocks.length}__`;
+          codeBlocks.push(`<pre><code>${code.trim()}</code></pre>`);
+          return token;
+        });
+
+        safe = safe
+          .replace(/^### (.*)$/gm, "<h3>$1</h3>")
+          .replace(/^## (.*)$/gm, "<h2>$1</h2>")
+          .replace(/^# (.*)$/gm, "<h1>$1</h1>")
+          .replace(/^\s*---+\s*$/gm, "<hr/>")
+          .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+          .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+          .replace(/^- (.*)$/gm, "<li>$1</li>");
+
+        safe = safe.replace(/(<li>.*<\/li>)/gs, "<ul>$1</ul>");
+        safe = safe
+          .split(/\n{2,}/)
+          .map((block) => {
+            const t = block.trim();
+            if (!t) return "";
+            if (isMarkdownTable(t)) return renderTable(t);
+            if (/^<h[1-3]>/.test(t) || /^<ul>/.test(t) || /^__CODE_BLOCK_/.test(t) || /^<pre>/.test(t)) return t;
+            return `<p>${t.replace(/\n/g, "<br/>")}</p>`;
+          })
+          .join("");
+
+        codeBlocks.forEach((html, i) => {
+          safe = safe.replace(`__CODE_BLOCK_${i}__`, html);
+        });
+        return safe;
+      }
+
+      function isMarkdownTable(block) {
+        const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
+        if (lines.length < 2) return false;
+        if (!lines[0].includes("|")) return false;
+        return /^\|?[\s:-]+\|[\s|:-]*\|?$/.test(lines[1]);
+      }
+
+      function renderTable(block) {
+        const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
+        const parseCells = (line) =>
+          line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+        const headers = parseCells(lines[0]);
+        const rows = lines.slice(2).map(parseCells);
+        const thead = `<thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead>`;
+        const tbody = `<tbody>${rows
+          .map((r) => `<tr>${headers.map((_, i) => `<td>${r[i] || ""}</td>`).join("")}</tr>`)
+          .join("")}</tbody>`;
+        return `<table>${thead}${tbody}</table>`;
       }
 
       async function uploadFiles() {
         const input = document.getElementById("file-input");
         if (!input.files.length) return;
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = "OCR处理中，请稍候...";
         const form = new FormData();
         Array.from(input.files).forEach((f) => form.append("files", f));
-        const res = await fetch("/api/upload", { method: "POST", body: form });
-        const data = await res.json();
-        filesList.innerHTML = "";
-        (data.results || []).forEach((item) => {
+        try {
+          const res = await fetch("/api/upload", { method: "POST", body: form });
+          const data = await res.json();
+          filesList.innerHTML = "";
+          (data.results || []).forEach((item) => {
+            const li = document.createElement("li");
+            li.textContent = item.ok
+              ? `${item.file}（${item.chunks} chunks）`
+              : `${item.file}（上传失败: ${item.error || "未知错误"}）`;
+            filesList.appendChild(li);
+          });
+          if (!res.ok && !(data.results || []).length) {
+            const li = document.createElement("li");
+            li.textContent = `上传失败: ${data.detail || "未知错误"}`;
+            filesList.appendChild(li);
+          }
+        } catch (err) {
+          filesList.innerHTML = "";
           const li = document.createElement("li");
-          li.textContent = `${item.file}（${item.chunks} chunks）`;
+          li.textContent = `上传失败: ${err?.message || "网络错误"}`;
           filesList.appendChild(li);
-        });
+        } finally {
+          uploadBtn.disabled = false;
+          uploadBtn.textContent = "上传并入库";
+        }
       }
 
       async function sendMessage() {
         const input = document.getElementById("message");
         const text = input.value.trim();
         if (!text) return;
+        sendBtn.disabled = true;
         renderMessage("user", text);
         input.value = "";
-        const res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text, history }),
-        });
-        const data = await res.json();
-        renderMessage("assistant", data.answer || "出错了，请稍后再试。");
-        history.push({ role: "user", content: text });
-        history.push({ role: "assistant", content: data.answer || "" });
-        sourcesList.innerHTML = "";
-        (data.sources || []).forEach((s) => {
-          const li = document.createElement("li");
-          li.textContent = `${s.source}: ${s.preview}`;
-          sourcesList.appendChild(li);
-        });
+        try {
+          const res = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: text, history }),
+          });
+          const data = await res.json();
+          renderMessage("assistant", data.answer || "出错了，请稍后再试。");
+          history.push({ role: "user", content: text });
+          history.push({ role: "assistant", content: data.answer || "" });
+          sourcesList.innerHTML = "";
+          (data.sources || []).forEach((s) => {
+            const li = document.createElement("li");
+            li.textContent = `${s.source}: ${s.preview}`;
+            sourcesList.appendChild(li);
+          });
+        } catch (err) {
+          renderMessage("assistant", `出错了：${err?.message || "网络错误"}`);
+        } finally {
+          sendBtn.disabled = false;
+        }
       }
 
       document.getElementById("upload-btn").addEventListener("click", uploadFiles);

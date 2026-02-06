@@ -32,9 +32,9 @@ def embed_text(client: OpenAI, model: str, text: str) -> list[float]:
     return list(resp.data[0].embedding)
 
 
-def ocr_with_vision(client: OpenAI, model: str, image_path: Path, mime_type: str) -> str:
-    encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
-    data_url = f"data:{mime_type};base64,{encoded}"
+def _vision_extract(client: OpenAI, model: str, data_url: str) -> str:
+    if len(data_url) > 19_000_000:
+        raise ValueError("图片编码后体积过大，超过模型接口限制，请降低分辨率后重试。")
     resp = client.chat.completions.create(
         model=model,
         messages=[
@@ -56,3 +56,17 @@ def ocr_with_vision(client: OpenAI, model: str, image_path: Path, mime_type: str
         temperature=0.1,
     )
     return resp.choices[0].message.content or ""
+
+
+def ocr_with_vision(client: OpenAI, model: str, image_path: Path, mime_type: str) -> str:
+    encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    data_url = f"data:{mime_type};base64,{encoded}"
+    return _vision_extract(client, model, data_url)
+
+
+def ocr_with_vision_bytes(
+    client: OpenAI, model: str, image_bytes: bytes, mime_type: str = "image/png"
+) -> str:
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{mime_type};base64,{encoded}"
+    return _vision_extract(client, model, data_url)
