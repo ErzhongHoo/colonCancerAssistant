@@ -29,6 +29,13 @@ STATIC_DIR = ROOT / "web"
 CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen-plus")
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-max")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
+LITERATURE_AGENT_TOPIC_QUERY = os.getenv(
+    "LITERATURE_AGENT_TOPIC_QUERY",
+    (
+        "(breast cancer OR mammary carcinoma OR breast neoplasm) "
+        "AND (clinical OR guideline OR trial OR treatment)"
+    ),
+).strip()
 
 app = FastAPI(title="Colon Cancer RAG MVP")
 client = build_client()
@@ -146,6 +153,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "chunks": len(store.chunks),
+        "literature_topic_query": LITERATURE_AGENT_TOPIC_QUERY,
         "models": {
             "chat": CHAT_MODEL,
             "vision": VISION_MODEL,
@@ -201,7 +209,7 @@ def chat(payload: ChatRequest) -> JSONResponse:
         {
             "role": "system",
             "content": (
-                "你是结直肠肿瘤方向的医学科普助手。"
+                "你是乳腺肿瘤方向的医学科普助手。"
                 "请基于提供的资料，给出：1) 通俗解释；2) 可能分期与风险点；"
                 "3) 下一步检查建议；4) 常见治疗路径（手术/化疗/靶向/免疫适用条件）。"
                 "不能替代医生诊断，必须明确提示患者线下就医。"
