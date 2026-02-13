@@ -32,7 +32,7 @@ def embed_text(client: OpenAI, model: str, text: str) -> list[float]:
     return list(resp.data[0].embedding)
 
 
-def _vision_extract(client: OpenAI, model: str, data_url: str) -> str:
+def _vision_extract(client: OpenAI, model: str, data_url: str, prompt_text: str) -> str:
     if len(data_url) > 19_000_000:
         raise ValueError("图片编码后体积过大，超过模型接口限制，请降低分辨率后重试。")
     resp = client.chat.completions.create(
@@ -47,7 +47,7 @@ def _vision_extract(client: OpenAI, model: str, data_url: str) -> str:
                 "content": [
                     {
                         "type": "text",
-                        "text": "请提取图片中的病例/化验/检查信息。按“检查项-结果-参考范围-异常提示”输出。",
+                        "text": prompt_text,
                     },
                     {"type": "image_url", "image_url": {"url": data_url}},
                 ],
@@ -61,7 +61,12 @@ def _vision_extract(client: OpenAI, model: str, data_url: str) -> str:
 def ocr_with_vision(client: OpenAI, model: str, image_path: Path, mime_type: str) -> str:
     encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
     data_url = f"data:{mime_type};base64,{encoded}"
-    return _vision_extract(client, model, data_url)
+    return _vision_extract(
+        client,
+        model,
+        data_url,
+        "请提取图片中的病例/化验/检查信息。按“检查项-结果-参考范围-异常提示”输出。",
+    )
 
 
 def ocr_with_vision_bytes(
@@ -69,4 +74,22 @@ def ocr_with_vision_bytes(
 ) -> str:
     encoded = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{mime_type};base64,{encoded}"
-    return _vision_extract(client, model, data_url)
+    return _vision_extract(
+        client,
+        model,
+        data_url,
+        "请提取图片中的病例/化验/检查信息。按“检查项-结果-参考范围-异常提示”输出。",
+    )
+
+
+def ocr_with_vision_bytes_transcribe(
+    client: OpenAI, model: str, image_bytes: bytes, mime_type: str = "image/png"
+) -> str:
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{mime_type};base64,{encoded}"
+    return _vision_extract(
+        client,
+        model,
+        data_url,
+        "请逐行转写图片中的全部可见中文/英文文字，保持原文含义，不要总结，不要改写，不要补充解释。",
+    )

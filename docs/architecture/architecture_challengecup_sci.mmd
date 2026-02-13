@@ -1,0 +1,19 @@
+flowchart LR
+  A[患者多模态资料\nPDF 图像 检验] --> B[隐私沙箱\n脱敏 会话隔离 TTL]
+  B --> C[双知识域检索\n内部指南 + 会话病例]
+  C --> D[Mamba 时序认知\n病程状态编码]
+  D --> E[证据约束推理\nClaim 级校验]
+  E --> F[可信答复输出\n结论 + 证据 + 风险]
+
+  B --> G[审计追踪\nTTL 销毁证明]
+  G --> F
+
+  classDef ingest fill:#0f1b34,stroke:#6e90d6,stroke-width:2px,color:#e7efff;
+  classDef trust fill:#12283c,stroke:#38b48b,stroke-width:2px,color:#dcfff3;
+  classDef core fill:#121f3d,stroke:#7aa2f7,stroke-width:2px,color:#e6eeff;
+  classDef output fill:#2a1f10,stroke:#f1b263,stroke-width:2px,color:#ffe9cb;
+
+  class A ingest;
+  class B,G trust;
+  class C,D,E core;
+  class F output;

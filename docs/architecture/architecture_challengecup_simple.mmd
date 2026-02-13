@@ -1,0 +1,20 @@
+flowchart LR
+  A[病例上传<br/>多模态文档] --> B[隐私沙箱<br/>脱敏 + 会话TTL]
+  B --> C[双知识域检索<br/>内部指南 + 会话病例]
+  C --> D[Mamba时序认知
+病程状态编码]
+  D --> E[可信生成
+证据约束推理]
+  E --> F[答复输出
+结论 + 证据 + 风险]
+
+  G[审计追踪] --> F
+  B --> G
+
+  classDef core fill:#eaf3ff,stroke:#4d7fd1,stroke-width:1.5px,color:#12335c;
+  classDef trust fill:#ecfff4,stroke:#3a9665,stroke-width:1.5px,color:#124a2d;
+  classDef output fill:#fff5e8,stroke:#d08b2c,stroke-width:1.5px,color:#6a3d00;
+
+  class A,C,D,E core;
+  class B,G trust;
+  class F output;

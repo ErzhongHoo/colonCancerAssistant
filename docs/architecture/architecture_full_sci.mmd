@@ -1,0 +1,76 @@
+flowchart TB
+  U[临床用户] --> FE[SCI UI 前端工作台]
+
+  FE -->|Upload| UP[/POST api upload/]
+  FE -->|Ask| CH[/POST api chat/]
+  FE -->|Timeline| TL[/GET api session timeline/]
+  FE -->|Audit| AU[/GET api audit/]
+
+  subgraph API[FastAPI Orchestrator]
+    UP
+    CH
+    TL
+    AU
+  end
+
+  subgraph INGEST[Ingestion & Privacy]
+    OCR[OCR & Parsing]
+    DEID[PHI Redaction]
+    SPLIT[Semantic Chunking]
+    EVT[Clinical Event Mining]
+  end
+
+  UP --> OCR --> DEID --> SPLIT
+  DEID --> EVT
+
+  subgraph STORE[Dual-Store Retrieval]
+    IVS[Internal Guideline Store]
+    SVS[Session Case Store TTL]
+    VEC[Vector Retrieval Layer]
+  end
+
+  SPLIT --> VEC
+  VEC --> IVS
+  VEC --> SVS
+
+  subgraph TIME[Temporal Cognition]
+    ENC[Encoder Router]
+    LIN[Linear Encoder]
+    SSM[SSM Encoder]
+    MAM[Mamba Encoder Default]
+  end
+
+  EVT --> ENC
+  ENC --> LIN
+  ENC --> SSM
+  ENC --> MAM
+
+  subgraph GEN[Grounded Generation]
+    RET[TopK Recall]
+    LLM[Medical LLM]
+    GRD[Evidence Guard]
+  end
+
+  CH --> RET
+  IVS --> RET
+  SVS --> RET
+  ENC --> RET
+  RET --> LLM --> GRD --> FE
+
+  subgraph AUD[Compliance Layer]
+    LOG[Audit Log]
+    PRF[TTL Proof]
+  end
+
+  UP --> LOG
+  CH --> LOG
+  SVS --> PRF --> LOG
+  AU --> LOG
+
+  classDef block fill:#111a2e,stroke:#5b7bbf,stroke-width:1.6px,color:#e8eefc;
+  classDef secure fill:#0f2234,stroke:#35a87c,stroke-width:1.8px,color:#dcfff2;
+  classDef output fill:#2b1f10,stroke:#f1b263,stroke-width:1.8px,color:#ffe8c8;
+
+  class OCR,DEID,SPLIT,EVT,VEC,IVS,SVS,ENC,LIN,SSM,MAM,RET,LLM,GRD,LOG,PRF block;
+  class DEID,LOG,PRF secure;
+  class FE output;

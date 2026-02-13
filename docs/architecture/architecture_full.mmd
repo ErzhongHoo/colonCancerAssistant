@@ -1,0 +1,65 @@
+flowchart TB
+  U[用户或评委] --> FE[前端 Web UI\nweb/index.html]
+
+  FE -->|上传病例| UP[/POST api upload/]
+  FE -->|提问| CH[/POST api chat/]
+  FE -->|看时间线| TL[/GET api session timeline/]
+  FE -->|看审计| AU[/GET api audit/]
+
+  subgraph API[FastAPI 服务层 app main]
+    UP
+    CH
+    TL
+    AU
+  end
+
+  subgraph INGEST[数据处理层]
+    OCR[多模态解析 OCR\napp ocr and app llm]
+    DEID[隐私脱敏\napp privacy]
+    SPLIT[文本切片\napp rag]
+    EVT[病程事件抽取\napp timeline]
+  end
+
+  UP --> OCR --> DEID --> SPLIT
+  DEID --> EVT
+
+  subgraph STORE[检索存储层]
+    IVS[内部向量库 持久化]
+    SVS[会话向量库 TTL]
+    VEC[向量检索抽象\napp vector store]
+  end
+
+  SPLIT --> VEC
+  VEC --> IVS
+  VEC --> SVS
+  TL --> EVT
+
+  subgraph TIME[时序认知层]
+    ENC[编码器路由\nlinear or ssm or mamba]
+    MAMBA[Mamba 编码器\napp mamba encoder]
+  end
+
+  EVT --> ENC
+  ENC --> MAMBA
+
+  subgraph GEN[生成与可信层]
+    RET[双库召回 TopK]
+    LLM[对话生成模型 Qwen]
+    GUARD[证据约束校验\napp evidence guard]
+  end
+
+  CH --> RET
+  IVS --> RET
+  SVS --> RET
+  ENC --> RET
+  RET --> LLM --> GUARD --> FE
+
+  subgraph AUDIT[合规审计层]
+    LOG[审计日志 JSONL\napp audit]
+    TTLP[TTL 销毁证明]
+  end
+
+  UP --> LOG
+  CH --> LOG
+  SVS --> TTLP --> LOG
+  AU --> LOG
