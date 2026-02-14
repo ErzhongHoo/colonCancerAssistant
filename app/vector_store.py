@@ -34,3 +34,13 @@ def build_internal_store(db_path: Path) -> VectorStore:
 def build_session_store() -> VectorStore:
     # Session store is intentionally in-memory to avoid persisting user uploads.
     return MemoryVectorStore()
+
+
+def build_user_store(user_data_dir: Path) -> VectorStore:
+    """Build a persistent vector store for a specific user.
+
+    Unlike session stores (in-memory), user stores persist to disk so that
+    data survives across sessions/page reloads.
+    """
+    db_path = user_data_dir / "user_vector_store.json"
+    return LocalVectorStore(db_path)

@@ -6,17 +6,17 @@ from dataclasses import asdict, dataclass
 from typing import Callable
 
 
-MEDICAL_CLAIM_KEYWORDS = (
-    "建议",
-    "分期",
-    "风险",
-    "化疗",
-    "靶向",
-    "免疫",
-    "手术",
-    "转移",
-    "复发",
-    "指标",
+# Keywords whose presence makes a sentence more likely to be a verifiable claim.
+_CLAIM_PRIORITY_KEYWORDS = (
+    "建议", "分期", "风险", "化疗", "靶向", "免疫", "手术", "转移", "复发", "指标",
+    "方案", "推荐", "禁忌", "剂量", "疗效", "不良反应", "生存", "预后",
+    "诊断", "术后", "术前", "放疗", "辅助", "联合", "首选",
+    "OS", "PFS", "DFS", "ORR", "HR", "CI",
+)
+
+# Patterns that indicate structural/non-claim lines.
+_NON_CLAIM_PATTERNS = re.compile(
+    r"^(#{1,6}\s|\|.*\||\*{3,}|\-{3,}|\s*$|>\s)"
 )
 
 
@@ -50,21 +50,27 @@ class EvidenceGuardReport:
 
 
 def _split_claims(answer: str) -> list[str]:
+    """Extract verifiable medical claims from an LLM answer.
+
+    A claim is any substantive sentence (≥10 chars) that is not purely
+    structural (headings, table separators, empty lines).  Sentences
+    containing medical-domain keywords are always included; others are
+    included only if they are long enough to contain actionable content.
+    """
     parts = re.split(r"[\n。；;!?！？]+", answer)
     claims = []
     for part in parts:
         line = part.strip()
-        if len(line) < 8:
+        if len(line) < 10:
             continue
-        if line.startswith("#"):
+        if _NON_CLAIM_PATTERNS.match(line):
             continue
-        # Ignore markdown table separators and generic table rows.
-        if line.startswith("|") and line.count("|") >= 2:
-            if re.search(r"\|\s*:?-{3,}:?\s*\|", line):
-                continue
-            # Most table rows are formatting-heavy and produce noisy false negatives.
+        # Skip markdown table separators.
+        if line.startswith("|") and re.search(r"\|\s*:?-{3,}:?\s*\|", line):
             continue
-        if any(k in line for k in MEDICAL_CLAIM_KEYWORDS):
+        # Include if it contains priority keywords OR is substantive (≥15 chars).
+        has_keyword = any(k in line for k in _CLAIM_PRIORITY_KEYWORDS)
+        if has_keyword or len(line) >= 15:
             claims.append(line)
     return claims
 
@@ -238,7 +244,7 @@ def verify_answer_with_evidence(
                 best_embed = 0.0
 
         support_score = max(best_overlap, best_embed)
-        if best_overlap >= 0.08 or best_embed >= 0.7:
+        if best_overlap >= 0.15 or best_embed >= 0.65:
             verified += 1
             if best_embed >= 0.7 and best_overlap < 0.08:
                 reason = f"embedding相似度={best_embed:.2f}"

@@ -105,13 +105,80 @@ curl -X POST "http://127.0.0.1:8000/api/internal/import-guidelines" \
 - `LITERATURE_AGENT_REFRESH_HOURS=24`：本地文献库自动刷新间隔（小时）
 - `ENABLE_WEB_LITERATURE=false`：是否启用联网检索兜底
 - `LITERATURE_PROVIDER=pubmed`：学术来源（默认仅医学数据库 PubMed）
-- `LITERATURE_TOP_K=5`：每轮检索返回条数（上限5）
+- `LITERATURE_TOP_K=8`：每轮检索返回目标条数（动态返回，不再强制5条）
 - `LITERATURE_TIMEOUT_SECONDS=8`：联网检索超时时间（秒）
 - `LITERATURE_MEDICAL_ONCOLOGY_ONLY=true`：仅保留医学肿瘤文献
 - `LITERATURE_MIN_RELEVANCE=0.18`：最低相关性阈值（低于阈值直接丢弃）
 - `AUTO_EVIDENCE_REWRITE=true`：低充分度时自动二次改写答案
 - `EVIDENCE_REWRITE_MIN_COVERAGE=0.75`：触发改写的最低证据覆盖率阈值
 - `EVIDENCE_REWRITE_MAX_UNSUPPORTED=1`：触发改写的最大不支持结论阈值
+- `JWT_SECRET=<your_secret>`：JWT 签名密钥（详见下方认证章节）
+- `JWT_EXPIRE_SECONDS=604800`：JWT 令牌过期时间（默认 7 天）
+
+## 8.1 用户认证与数据库
+
+### 技术方案
+
+系统采用 **SQLite + JWT** 实现用户认证：
+
+| 组件 | 技术 | 说明 |
+|---|---|---|
+| 用户数据存储 | **SQLite** | 嵌入式数据库，无需单独安装或启动服务 |
+| 认证令牌 | **JWT (JSON Web Token)** | 无状态令牌，服务器重启后登录状态不丢失 |
+| 密码安全 | SHA-256 + per-user salt | 每个用户独立的随机盐值 |
+| 用户数据 | 文件系统 | 每个用户独立目录 `data/user_data/{user_id}/` |
+
+### 数据库说明
+
+SQLite 是**嵌入式数据库**，不需要单独安装或启动数据库服务器：
+
+- 数据库文件位于 `data/users.db`，应用启动时自动创建
+- Python 标准库自带 `sqlite3` 模块，**零额外依赖**
+- 使用 WAL 模式支持并发读写
+
+### JWT 配置
+
+在 `.env` 中配置 JWT 相关参数：
+
+```env
+# JWT 签名密钥（必须设置，否则每次重启会自动生成新密钥，导致已有令牌失效）
+JWT_SECRET=your_strong_random_secret_here
+
+# JWT 令牌过期时间，单位秒（默认 604800 = 7天）
+JWT_EXPIRE_SECONDS=604800
+```
+
+> **注意**：生产环境中请务必在 `.env` 中设置一个强随机密钥作为 `JWT_SECRET`。如果未设置，系统会在启动时自动生成一个临时密钥，但每次重启后所有用户都需要重新登录。
+>
+> 可以用以下命令生成一个安全的密钥：
+> ```bash
+> python3 -c "import secrets; print(secrets.token_hex(32))"
+> ```
+
+### 从旧版本升级
+
+如果你之前使用了旧版（JSON 文件存储 + 内存 Token），升级时系统会**自动完成数据迁移**：
+
+1. 首次启动时，检测到 `data/users.json` 文件存在
+2. 自动将所有用户数据迁移到 `data/users.db`（SQLite）
+3. 旧文件重命名为 `data/users.json.migrated`（作为备份）
+4. 迁移完成后，后续启动不再触发迁移
+
+> **注意**：旧版的内存 Token 无法迁移（它们本来就不持久化），升级后所有用户需要重新登录。
+
+### 认证 API
+
+| 接口 | 方法 | 说明 |
+|---|---|---|
+| `/api/auth/register` | POST | 注册新用户，返回 JWT 令牌 |
+| `/api/auth/login` | POST | 用户登录，返回 JWT 令牌 |
+| `/api/auth/logout` | POST | 登出（客户端清除令牌即可） |
+| `/api/auth/me` | GET | 获取当前登录用户信息和数据统计 |
+| `/api/user/delete-data` | POST | 清除当前用户的所有上传数据 |
+| `/api/user/delete-account` | POST | 注销账户（永久删除） |
+| `/api/user/delete-upload` | POST | 删除指定上传文件的数据 |
+
+所有需要认证的接口通过 `Authorization: Bearer <token>` 请求头传递 JWT 令牌。
 
 ## 9. 当前已完成
 
@@ -151,6 +218,8 @@ uv run --python .venv/bin/python -m app.literature_agent \
 ## 11. 后续可扩展
 
 - 切到正式向量数据库（Milvus / pgvector / Elasticsearch）
-- 增加用户身份与隐私隔离
+- ~~增加用户身份与隐私隔离~~ 已完成（SQLite + JWT 认证）
+- JWT Token 黑名单机制（支持主动吊销令牌）
+- 升级到 PostgreSQL 等生产级数据库（当前 SQLite 适用于中小规模）
 - 增加多轮病程“时间线”结构化抽取
 - 后续再加 LoRA 或私有微调模型

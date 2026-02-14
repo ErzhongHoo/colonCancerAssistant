@@ -8,3 +8,4 @@ pymupdf==1.26.4
 numpy==2.2.6
 Pillow==11.3.0
 paddleocr==2.8.1
+PyJWT==2.11.0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 from pathlib import Path
 
@@ -78,7 +79,10 @@ def ocr_with_vision_bytes(
         client,
         model,
         data_url,
-        "请提取图片中的病例/化验/检查信息。按“检查项-结果-参考范围-异常提示”输出。",
+        (
+            "请逐行转写图片中的全部可见中文/英文文字，必须保留日期、时间、页眉、页脚、单位和编号；"
+            "不要总结，不要改写，不要补充解释。"
+        ),
     )
 
 
@@ -93,3 +97,46 @@ def ocr_with_vision_bytes_transcribe(
         data_url,
         "请逐行转写图片中的全部可见中文/英文文字，保持原文含义，不要总结，不要改写，不要补充解释。",
     )
+
+
+def extract_date_with_vision_bytes(
+    client: OpenAI, model: str, image_bytes: bytes, mime_type: str = "image/png"
+) -> str:
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{mime_type};base64,{encoded}"
+    return _vision_extract(
+        client,
+        model,
+        data_url,
+        (
+            "请在图片中寻找“检查日期/报告日期/采样日期/就诊日期”。"
+            "只输出一个日期，格式必须为YYYY-MM-DD；如果找不到输出NA。"
+        ),
+    ).strip()
+
+
+def extract_date_fields_with_vision_bytes(
+    client: OpenAI, model: str, image_bytes: bytes, mime_type: str = "image/png"
+) -> dict[str, str]:
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{mime_type};base64,{encoded}"
+    raw = _vision_extract(
+        client,
+        model,
+        data_url,
+        (
+            "请识别图片中的日期字段，并严格返回JSON对象，字段固定为："
+            "{\"exam_date\":\"YYYY-MM-DD或NA\",\"submit_date\":\"YYYY-MM-DD或NA\",\"report_date\":\"YYYY-MM-DD或NA\"}。"
+            "exam_date=检查日期；submit_date=送检/采样日期；report_date=报告日期。"
+            "只输出JSON，不要输出其他内容。"
+        ),
+    ).strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {"exam_date": "NA", "submit_date": "NA", "report_date": "NA"}
+    out = {}
+    for key in ("exam_date", "submit_date", "report_date"):
+        value = str(parsed.get(key, "NA")).strip()
+        out[key] = value if value else "NA"
+    return out

@@ -78,16 +78,53 @@ def _tokenize(text: str) -> set[str]:
     return set(re.findall(r"[A-Za-z0-9\u4e00-\u9fa5]{2,}", (text or "").lower()))
 
 
-def _score_relevance(query: str, title: str, abstract: str, year: int | None) -> float:
-    q = _tokenize(query)
-    d = _tokenize(f"{title} {abstract}")
-    overlap = (len(q & d) / max(len(q), 1)) if q else 0.0
+def _score_relevance(query: str, title: str, abstract: str, year: int | None, paper_type: str = "other") -> float:
+    """Multi-signal relevance scoring.
+
+    Combines:
+    1. Token overlap F1 (harmonic mean of recall & precision).
+    2. CJK bi-gram overlap for Chinese queries.
+    3. Paper type bonus (guidelines & systematic reviews rank higher).
+    4. Recency with gentler decay.
+    """
+    q_tokens = _tokenize(query)
+    d_tokens = _tokenize(f"{title} {abstract}")
+
+    # --- Signal 1: Token overlap F1 ---
+    if q_tokens and d_tokens:
+        intersection = len(q_tokens & d_tokens)
+        recall = intersection / max(len(q_tokens), 1)
+        precision = intersection / max(len(d_tokens), 1)
+        f1 = 2 * recall * precision / max(recall + precision, 1e-8)
+    else:
+        f1 = 0.0
+
+    # --- Signal 2: CJK bi-gram overlap ---
+    q_cn = re.sub(r"[^\u4e00-\u9fa5]", "", query)
+    d_cn = re.sub(r"[^\u4e00-\u9fa5]", "", f"{title} {abstract}")
+    cjk_score = 0.0
+    if len(q_cn) >= 2 and len(d_cn) >= 2:
+        q_bigrams = {q_cn[i:i+2] for i in range(len(q_cn) - 1)}
+        d_bigrams = {d_cn[i:i+2] for i in range(len(d_cn) - 1)}
+        if q_bigrams:
+            cjk_score = len(q_bigrams & d_bigrams) / max(len(q_bigrams), 1)
+
+    # --- Signal 3: Paper type bonus ---
+    type_bonus = {
+        "guideline": 0.15,
+        "meta_or_systematic_review": 0.10,
+        "clinical_trial": 0.05,
+    }.get(paper_type, 0.0)
+
+    # --- Signal 4: Recency with gentler decay ---
     recency = 0.0
     if year:
         now_year = time.gmtime().tm_year
         age = max(now_year - year, 0)
-        recency = max(0.0, 1.0 - min(age, 12) / 12.0)
-    return round(overlap * 0.78 + recency * 0.22, 4)
+        recency = max(0.0, 1.0 - (min(age, 15) / 15.0) ** 0.7)
+
+    score = f1 * 0.40 + cjk_score * 0.20 + recency * 0.20 + type_bonus + 0.20 * max(f1, cjk_score)
+    return round(min(score, 1.0), 4)
 
 
 def _is_medical_oncology_item(title: str, abstract: str, venue: str) -> bool:
@@ -373,7 +410,7 @@ def search_literature(
             if _is_medical_oncology_item(item.title, item.abstract, item.venue)
         ]
     for item in deduped:
-        item.relevance = _score_relevance(query, item.title, item.abstract, item.year)
+        item.relevance = _score_relevance(query, item.title, item.abstract, item.year, paper_type=item.paper_type)
     deduped.sort(key=lambda x: x.relevance, reverse=True)
     deduped = _embedding_rerank(query, deduped[: max(top_k * 3, top_k)], embed_fn=embed_fn)
     deduped = [item for item in deduped if item.relevance >= min_relevance]

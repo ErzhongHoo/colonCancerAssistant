@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import io
+import base64
 import mimetypes
 import os
 import re
 import time
 import uuid
+import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,7 +16,10 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from PIL import Image
 from pydantic import BaseModel
+
+from app.auth import UserManager
 from pypdf import PdfReader
 
 from app.audit import AuditLogger
@@ -29,9 +35,21 @@ from app.literature_search import (
     search_literature,
     verify_literature_citations,
 )
-from app.llm import build_client, embed_text, ocr_with_vision_bytes, ocr_with_vision_bytes_transcribe
-from app.ocr import is_paddle_available, ocr_with_paddle_bytes
-from app.privacy import redact_sensitive_info
+from app.llm import (
+    build_client,
+    embed_text,
+    extract_date_fields_with_vision_bytes,
+    extract_date_with_vision_bytes,
+    ocr_with_vision_bytes,
+    ocr_with_vision_bytes_transcribe,
+)
+from app.ocr import (
+    draw_redaction_boxes,
+    is_paddle_available,
+    ocr_with_paddle_bytes,
+    ocr_with_paddle_bytes_detailed,
+)
+from app.privacy import detect_sensitive_types, extract_redaction_preview, redact_sensitive_info
 from app.rag import split_text
 from app.timeline import (
     ClinicalEvent,
@@ -40,9 +58,10 @@ from app.timeline import (
     encode_timeline_state,
     events_to_dict,
     extract_events,
+    extract_events_with_llm,
     merge_events,
 )
-from app.vector_store import VectorStore, build_internal_store, build_session_store, get_vector_backend
+from app.vector_store import VectorStore, build_internal_store, build_session_store, build_user_store, get_vector_backend
 
 try:
     import fitz  # type: ignore
@@ -55,7 +74,10 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = ROOT / "web"
 GUIDELINES_DIR = ROOT / "data" / "guidelines"
 INTERNAL_VECTOR_DB = ROOT / "data" / "internal_vector_store.json"
+GUIDELINES_VERSION_PATH = ROOT / "data" / "guidelines_versions.json"
 AUDIT_LOG_PATH = ROOT / "data" / "audit_log.jsonl"
+USER_DB_PATH = ROOT / "data" / "users.db"
+USER_DATA_ROOT = ROOT / "data" / "user_data"
 
 CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen-plus")
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-max")
@@ -66,9 +88,13 @@ ENABLE_UPLOAD_DEID = os.getenv("ENABLE_UPLOAD_DEID", "true").strip().lower() in 
 OCR_PROVIDER = os.getenv("OCR_PROVIDER", "auto").strip().lower()
 PADDLE_OCR_LANG = os.getenv("PADDLE_OCR_LANG", "ch").strip()
 PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "500"))
+ENABLE_IMAGE_DATE_VLM = os.getenv("ENABLE_IMAGE_DATE_VLM", "true").strip().lower() in {"1", "true", "yes", "on"}
 TIMELINE_ENCODER = os.getenv("TIMELINE_ENCODER", "mamba").strip().lower()
 if TIMELINE_ENCODER not in {"linear", "ssm", "mamba"}:
     TIMELINE_ENCODER = "mamba"
+ENABLE_LLM_TIMELINE = (
+    os.getenv("ENABLE_LLM_TIMELINE", "true").strip().lower() in {"1", "true", "yes", "on"}
+)
 MANUAL_SESSION_CLEAR_ONLY = (
     os.getenv("MANUAL_SESSION_CLEAR_ONLY", "true").strip().lower() in {"1", "true", "yes", "on"}
 )
@@ -92,7 +118,7 @@ LITERATURE_PROVIDERS = [
     for p in os.getenv("LITERATURE_PROVIDER", "pubmed").split(",")
     if p.strip()
 ]
-LITERATURE_TOP_K = min(max(int(os.getenv("LITERATURE_TOP_K", "5")), 1), 5)
+LITERATURE_TOP_K = max(int(os.getenv("LITERATURE_TOP_K", "8")), 1)
 LITERATURE_TIMEOUT_SECONDS = max(float(os.getenv("LITERATURE_TIMEOUT_SECONDS", "8")), 1.0)
 LITERATURE_MEDICAL_ONCOLOGY_ONLY = (
     os.getenv("LITERATURE_MEDICAL_ONCOLOGY_ONLY", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -108,6 +134,29 @@ app = FastAPI(title="Colon Cancer RAG MVP")
 client = build_client()
 internal_store = build_internal_store(INTERNAL_VECTOR_DB)
 audit_logger = AuditLogger(AUDIT_LOG_PATH)
+user_manager = UserManager(USER_DB_PATH, USER_DATA_ROOT)
+
+# ---------------------------------------------------------------------------
+# Global LRU embedding cache (cross-request)
+# ---------------------------------------------------------------------------
+from collections import OrderedDict
+
+_EMBED_CACHE_MAX = int(os.getenv("EMBED_CACHE_MAX", "2048"))
+_global_embed_cache: OrderedDict[str, list[float]] = OrderedDict()
+
+
+def _global_embed(text: str) -> list[float]:
+    """Embed *text* with global LRU caching."""
+    cached = _global_embed_cache.get(text)
+    if cached is not None:
+        _global_embed_cache.move_to_end(text)
+        return cached
+    vec = embed_text(client, EMBEDDING_MODEL, text)
+    _global_embed_cache[text] = vec
+    while len(_global_embed_cache) > _EMBED_CACHE_MAX:
+        _global_embed_cache.popitem(last=False)
+    return vec
+
 IMAGE_SUFFIXES = {
     ".jpg",
     ".jpeg",
@@ -123,6 +172,17 @@ IMAGE_SUFFIXES = {
 }
 
 
+def _is_image_input(file_name: str, content_type: str | None) -> tuple[bool, str]:
+    guessed_mime = mimetypes.guess_type(file_name)[0] or ""
+    mime = content_type or guessed_mime or ""
+    suffix = Path(file_name).suffix.lower()
+    is_image = mime.startswith("image/") or suffix in IMAGE_SUFFIXES
+    if mime == "application/octet-stream" and suffix in IMAGE_SUFFIXES:
+        is_image = True
+        mime = guessed_mime or "image/jpeg"
+    return is_image, (mime or "image/jpeg")
+
+
 @dataclass
 class SessionStoreState:
     store: VectorStore
@@ -131,6 +191,9 @@ class SessionStoreState:
 
 session_stores: dict[str, SessionStoreState] = {}
 session_timeline_events: dict[str, list[ClinicalEvent]] = {}
+# Per-user persistent stores (lazy loaded)
+user_stores: dict[str, VectorStore] = {}
+user_timeline_events: dict[str, list[ClinicalEvent]] = {}
 literature_index: dict[str, dict[str, object]] = load_index()
 literature_last_refresh_at = 0.0
 literature_last_refresh_result: dict[str, Any] = {}
@@ -243,6 +306,70 @@ def _get_session_id(request: Request) -> str:
     return f"s-{uuid.uuid4().hex[:16]}"
 
 
+def _get_auth_user(request: Request):
+    """Try to get the authenticated user from the Authorization header."""
+    auth_header = request.headers.get("authorization", "").strip()
+    if not auth_header.startswith("Bearer "):
+        return None, None
+    token = auth_header[7:].strip()
+    if not token:
+        return None, None
+    user = user_manager.get_user_by_token(token)
+    if user:
+        return user, user.user_id
+    return None, None
+
+
+def _get_or_create_user_store(user_id: str) -> VectorStore:
+    """Get or create a persistent vector store for an authenticated user."""
+    if user_id in user_stores:
+        return user_stores[user_id]
+    user_dir = user_manager.get_user_data_dir(user_id)
+    store = build_user_store(user_dir)
+    user_stores[user_id] = store
+    return store
+
+
+def _get_user_store(user_id: str) -> VectorStore | None:
+    """Get the persistent vector store for an authenticated user."""
+    if user_id in user_stores:
+        return user_stores[user_id]
+    user_dir = user_manager.get_user_data_dir(user_id)
+    store = build_user_store(user_dir)
+    user_stores[user_id] = store
+    return store
+
+
+def _load_user_timeline(user_id: str) -> list[ClinicalEvent]:
+    """Load timeline events from user persistent storage."""
+    if user_id in user_timeline_events:
+        return user_timeline_events[user_id]
+    user_dir = user_manager.get_user_data_dir(user_id)
+    timeline_path = user_dir / "timeline_events.json"
+    if timeline_path.exists():
+        try:
+            raw = json.loads(timeline_path.read_text(encoding="utf-8"))
+            events = [ClinicalEvent(**item) for item in raw]
+            user_timeline_events[user_id] = events
+            return events
+        except Exception:
+            pass
+    user_timeline_events[user_id] = []
+    return []
+
+
+def _save_user_timeline(user_id: str) -> None:
+    """Persist timeline events for an authenticated user."""
+    events = user_timeline_events.get(user_id, [])
+    user_dir = user_manager.get_user_data_dir(user_id)
+    timeline_path = user_dir / "timeline_events.json"
+    from dataclasses import asdict
+    timeline_path.write_text(
+        json.dumps([asdict(ev) for ev in events], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def _get_or_create_session_store(session_id: str) -> VectorStore:
     _cleanup_expired_sessions()
     now = time.time()
@@ -263,21 +390,45 @@ def _get_session_store(session_id: str) -> VectorStore | None:
     return state.store
 
 
-def _add_timeline_events(session_id: str, source: str, text: str) -> int:
-    existing = session_timeline_events.get(session_id, [])
-    extracted = extract_events(text, source=source)
+def _add_timeline_events(session_id: str, source: str, text: str, *, user_id: str | None = None) -> tuple[int, bool]:
+    """Extract and add timeline events. If user_id is provided, persist to disk."""
+    if user_id:
+        existing = _load_user_timeline(user_id)
+    else:
+        existing = session_timeline_events.get(session_id, [])
+    if ENABLE_LLM_TIMELINE:
+        extracted = extract_events_with_llm(client, CHAT_MODEL, text, source=source)
+    else:
+        extracted = extract_events(text, source=source)
+    has_known_date = any(str(ev.date).strip() and str(ev.date).strip() != "\u672a\u77e5\u65e5\u671f" for ev in extracted)
     if not extracted:
-        return 0
-    session_timeline_events[session_id] = merge_events(existing, extracted)
-    return len(extracted)
+        return 0, has_known_date
+    merged = merge_events(existing, extracted)
+    if user_id:
+        user_timeline_events[user_id] = merged
+        _save_user_timeline(user_id)
+    else:
+        session_timeline_events[session_id] = merged
+    return len(extracted), has_known_date
 
 
-def _get_timeline_events(session_id: str) -> list[ClinicalEvent]:
+def _get_timeline_events(session_id: str, *, user_id: str | None = None) -> list[ClinicalEvent]:
+    if user_id:
+        return _load_user_timeline(user_id)
     _cleanup_expired_sessions()
     return session_timeline_events.get(session_id, [])
 
 
-def _get_session_expiry(session_id: str) -> dict[str, Any]:
+def _get_session_expiry(session_id: str, *, user_id: str | None = None) -> dict[str, Any]:
+    if user_id:
+        # Authenticated users have persistent data, never expires
+        return {
+            "session_active": True,
+            "manual_clear_only": True,
+            "ttl_seconds": 0,
+            "expires_in_seconds": None,
+            "persistent": True,
+        }
     _cleanup_expired_sessions()
     state = session_stores.get(session_id)
     if MANUAL_SESSION_CLEAR_ONLY:
@@ -419,7 +570,12 @@ def _extract_file_text(path: Path, content_type: str | None, ocr_mode: str = "cl
     if mime.startswith("text/") or suffix in {".md", ".txt", ".csv"}:
         return _extract_raw_text(path)
     if is_image:
-        return _ocr_image_with_fallback(path.read_bytes(), mime or "image/png", ocr_mode=ocr_mode)
+        text, _meta = _extract_image_text_with_date(
+            file_bytes=path.read_bytes(),
+            mime_type=mime or "image/png",
+            ocr_mode=ocr_mode,
+        )
+        return text
     raise HTTPException(status_code=400, detail=f"不支持的文件类型: {path.name}")
 
 
@@ -428,7 +584,7 @@ def _extract_file_text_from_bytes(
     content_type: str | None,
     file_bytes: bytes,
     ocr_mode: str = "clinical",
-) -> str:
+) -> tuple[str, dict[str, str]]:
     guessed_mime = mimetypes.guess_type(file_name)[0] or ""
     mime = content_type or guessed_mime or ""
     suffix = Path(file_name).suffix.lower()
@@ -438,12 +594,158 @@ def _extract_file_text_from_bytes(
         mime = guessed_mime or "image/jpeg"
 
     if suffix == ".pdf" or mime == "application/pdf":
-        return _extract_pdf_text_from_bytes(file_bytes, ocr_mode=ocr_mode)
+        return _extract_pdf_text_from_bytes(file_bytes, ocr_mode=ocr_mode), {}
     if mime.startswith("text/") or suffix in {".md", ".txt", ".csv"}:
-        return _extract_raw_text_from_bytes(file_bytes)
+        return _extract_raw_text_from_bytes(file_bytes), {}
     if is_image:
-        return _ocr_image_with_fallback(file_bytes, mime or "image/png", ocr_mode=ocr_mode)
+        return _extract_image_text_with_date(
+            file_bytes=file_bytes,
+            mime_type=mime or "image/png",
+            ocr_mode=ocr_mode,
+        )
     raise HTTPException(status_code=400, detail=f"不支持的文件类型: {file_name}")
+
+
+def _extract_first_iso_date(text: str) -> str | None:
+    m = re.search(r"(20\d{2})[-/.年]\s*(\d{1,2})[-/.月]\s*(\d{1,2})", text)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.search(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)", text)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    return None
+
+
+def _normalize_iso_date(raw: str) -> str | None:
+    m = re.search(r"(20\d{2})[-/.年]\s*(\d{1,2})[-/.月]\s*(\d{1,2})", raw or "")
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.search(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)", raw or "")
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    return None
+
+
+def _pick_timeline_date_from_fields(fields: dict[str, str]) -> tuple[str | None, str]:
+    exam = _normalize_iso_date(fields.get("exam_date", ""))
+    if exam:
+        return exam, "exam_date"
+    submit = _normalize_iso_date(fields.get("submit_date", ""))
+    if submit:
+        return submit, "submit_date"
+    report = _normalize_iso_date(fields.get("report_date", ""))
+    if report:
+        return report, "report_date"
+    return None, "none"
+
+
+def _extract_image_text_with_date(
+    file_bytes: bytes, mime_type: str, ocr_mode: str = "clinical"
+) -> tuple[str, dict[str, str]]:
+    text = _ocr_image_with_fallback(file_bytes, mime_type=mime_type, ocr_mode=ocr_mode)
+    if ocr_mode != "clinical" or not ENABLE_IMAGE_DATE_VLM:
+        return text, {}
+    date_from_text = _extract_first_iso_date(text)
+    if date_from_text:
+        return text, {"timeline_date": date_from_text, "timeline_date_source": "ocr_text"}
+    field_meta: dict[str, str] = {}
+    try:
+        date_fields = extract_date_fields_with_vision_bytes(client, VISION_MODEL, file_bytes, mime_type=mime_type)
+        field_meta = {k: str(v) for k, v in date_fields.items()}
+        chosen, source = _pick_timeline_date_from_fields(date_fields)
+        if chosen:
+            date_line = f"检查日期: {chosen}"
+            return (
+                f"{date_line}\n{text}".strip(),
+                {
+                    "timeline_date": chosen,
+                    "timeline_date_source": source,
+                    **field_meta,
+                },
+            )
+    except Exception:
+        pass
+    try:
+        date_raw = extract_date_with_vision_bytes(client, VISION_MODEL, file_bytes, mime_type=mime_type)
+    except Exception:
+        return text, {"timeline_date": "NA", "timeline_date_source": "not_found", **field_meta}
+    m = re.search(r"(20\d{2})-(\d{2})-(\d{2})", date_raw or "")
+    if not m:
+        return text, {"timeline_date": "NA", "timeline_date_source": "not_found", **field_meta}
+    date_line = f"检查日期: {m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return (
+        f"{date_line}\n{text}".strip(),
+        {
+            "timeline_date": f"{m.group(1)}-{m.group(2)}-{m.group(3)}",
+            "timeline_date_source": "single_date_fallback",
+            **field_meta,
+        },
+    )
+
+
+def _build_image_redaction_result(file_bytes: bytes, mime_type: str) -> dict[str, Any]:
+    if not is_paddle_available():
+        return {
+            "available": False,
+            "engine": "none",
+            "reason": "paddle_unavailable",
+            "ocr_word_count": 0,
+            "sensitive_box_count": 0,
+            "boxes": [],
+        }
+    try:
+        detailed = ocr_with_paddle_bytes_detailed(file_bytes, lang=PADDLE_OCR_LANG)
+    except Exception as exc:
+        return {
+            "available": False,
+            "engine": "paddle",
+            "reason": f"ocr_failed:{exc}",
+            "ocr_word_count": 0,
+            "sensitive_box_count": 0,
+            "boxes": [],
+        }
+    words = detailed.get("words", []) if isinstance(detailed, dict) else []
+    image = Image.open(io.BytesIO(file_bytes))
+    width, height = image.size
+    boxes: list[dict[str, Any]] = []
+    for word in words:
+        text = str(word.get("text", "")).strip()
+        if not text:
+            continue
+        hit_types = detect_sensitive_types(text)
+        if not hit_types:
+            continue
+        box = {
+            "text": text[:80],
+            "types": hit_types,
+            "x1": int(word.get("x1", 0)),
+            "y1": int(word.get("y1", 0)),
+            "x2": int(word.get("x2", 0)),
+            "y2": int(word.get("y2", 0)),
+            "image_width": int(width),
+            "image_height": int(height),
+        }
+        boxes.append(box)
+    if not boxes:
+        return {
+            "available": False,
+            "engine": "paddle",
+            "reason": "no_sensitive_boxes",
+            "ocr_word_count": len(words),
+            "sensitive_box_count": 0,
+            "boxes": [],
+        }
+    masked_bytes = draw_redaction_boxes(file_bytes, boxes)
+    data_url = "data:image/jpeg;base64," + base64.b64encode(masked_bytes).decode("ascii")
+    return {
+        "available": True,
+        "engine": "paddle",
+        "reason": "ok",
+        "ocr_word_count": len(words),
+        "sensitive_box_count": len(boxes),
+        "boxes": boxes[:80],
+        "masked_data_url": data_url,
+    }
 
 
 def _ocr_image_with_fallback(image_bytes: bytes, mime_type: str, ocr_mode: str = "clinical") -> str:
@@ -518,19 +820,185 @@ def _extract_cited_pages(answer: str) -> set[int]:
 
 
 def _extract_page_from_text(text: str) -> int | None:
+    """Extract page number from text using multiple pattern strategies."""
+    # Pattern 1: Chinese page marker [第N页]
     m = re.search(r"\[第\s*(\d{1,4})\s*页\]", text)
     if m:
         try:
             return int(m.group(1))
         except Exception:
-            return None
-    m = re.search(r"\[(?:P|p)\s*(\d{1,4})\]", text)
+            pass
+    # Pattern 2: English page marker [P123] or [p123]
+    m = re.search(r"\[(?:P|p|page)\s*(\d{1,4})\]", text, re.IGNORECASE)
     if m:
         try:
             return int(m.group(1))
         except Exception:
-            return None
+            pass
+    # Pattern 3: Page header/footer markers like "—12—" or "- 12 -"
+    m = re.search(r"[—\-]\s*(\d{1,4})\s*[—\-]", text)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            pass
+    # Pattern 4: Explicit "第X页" without brackets
+    m = re.search(r"第\s*(\d{1,4})\s*页", text)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            pass
     return None
+
+
+def _extract_section_from_text(text: str) -> str | None:
+    """Try to identify the section/heading that a chunk belongs to."""
+    # Look for markdown headings
+    m = re.search(r"^(#{1,4})\s+(.+?)$", text, re.MULTILINE)
+    if m:
+        return m.group(2).strip()[:80]
+    # Look for numbered section headers like "3.2 xxx" or "第三章 xxx"
+    m = re.search(r"^(\d+\.[\d.]*\s+\S.+?)$", text, re.MULTILINE)
+    if m:
+        return m.group(1).strip()[:80]
+    m = re.search(r"(第[一二三四五六七八九十\d]+[章节条款]\s*\S.+?)[\n。]", text)
+    if m:
+        return m.group(1).strip()[:80]
+    return None
+
+
+MODEL_DISCLOSURE_PATTERNS = [
+    re.compile(r"\bqwen\d*\b", re.IGNORECASE),
+    re.compile(r"通义"),
+    re.compile(r"千问"),
+    re.compile(r"我是.*模型"),
+    re.compile(r"模型版本"),
+    re.compile(r"大语言模型"),
+]
+
+
+def _sanitize_model_disclosure(answer: str) -> str:
+    if not answer.strip():
+        return answer
+    hit = any(p.search(answer) for p in MODEL_DISCLOSURE_PATTERNS)
+    if not hit:
+        return answer
+    safe_line = "我是医疗助手，会基于你提供的资料给出风险与就医建议。"
+    lines = answer.splitlines()
+    sanitized: list[str] = []
+    for line in lines:
+        if any(p.search(line) for p in MODEL_DISCLOSURE_PATTERNS):
+            sanitized.append(safe_line)
+        else:
+            sanitized.append(line)
+    out = "\n".join(sanitized).strip()
+    out = re.sub(r"(?:Qwen|通义|千问)\S*", "医疗助手", out, flags=re.IGNORECASE)
+    return out
+
+
+def _should_use_external_literature(query: str, timeline_events: list[ClinicalEvent]) -> bool:
+    q = (query or "").strip().lower()
+    if not q:
+        return False
+
+    # --- Negative patterns: suppress false triggers for non-evidence queries ---
+    suppress_patterns = ("下载", "在哪里", "链接", "网址", "打不开", "登录", "注册", "密码")
+    if any(p in q for p in suppress_patterns):
+        return False
+
+    # --- Signal 1: Explicit evidence / literature request ---
+    explicit_terms = (
+        "文献", "论文", "研究", "依据", "证据", "共识",
+        "meta", "trial", "randomized", "nccn", "csco", "asco", "esmo",
+        "pubmed", "lancet", "nejm", "jco",
+    )
+    if any(t in q for t in explicit_terms):
+        return True
+
+    # --- Signal 2: Clinical decision questions needing evidence support ---
+    # These patterns indicate treatment/management decisions where literature matters.
+    clinical_decision_terms = (
+        "方案", "治疗", "用药", "换药", "化疗", "靶向", "免疫",
+        "二线", "三线", "一线", "后线",
+        "复发", "转移", "耐药", "进展",
+        "分期", "预后", "生存率", "生存期",
+        "手术", "切除", "新辅助", "辅助",
+        "推荐", "选择", "对比", "优劣",
+        "基因", "突变", "biomarker", "her2", "kras", "braf", "msi",
+    )
+    decision_score = sum(1 for t in clinical_decision_terms if t in q)
+    if decision_score >= 2:
+        return True
+
+    # --- Signal 3: Complex patient with any clinical management question ---
+    if len(timeline_events) >= 3 and decision_score >= 1:
+        return True
+
+    # --- Signal 4: Guideline-related but asked as a clinical question ---
+    guideline_context_terms = ("指南", "规范", "标准", "guideline")
+    if any(t in q for t in guideline_context_terms) and decision_score >= 1:
+        return True
+
+    # --- Signal 5: Interpretation/Analysis intent ---
+    interpretation_terms = ("解读", "分析", "看看", "评估", "含义")
+    if any(t in q for t in interpretation_terms) and (len(timeline_events) >= 1 or decision_score >= 1):
+        return True
+
+    return False
+
+
+
+def _assess_reasoning_mode(
+    query: str,
+    timeline_events: list[ClinicalEvent],
+    history: list[dict[str, str]],
+) -> tuple[str, dict[str, Any]]:
+    q = (query or "").strip().lower()
+    score = 0
+    reasons: list[str] = []
+
+    # 1. Urgent triage is always quick (direct response).
+    urgent_terms = ("胸痛", "呼吸困难", "昏迷", "抽搐", "大出血", "高热不退", "急诊", "120", "救命")
+    if any(t in q for t in urgent_terms):
+        return "quick", {"score": 10, "reasons": ["urgent_triage"]}
+
+    # 2. Explicit interpretation intent -> Deep
+    interpretation_terms = ("解读", "分析", "看看", "评估", "含义", "意思", "说明", "报告", "结果")
+    if any(t in q for t in interpretation_terms):
+        score += 2
+        reasons.append("interpretation_intent")
+
+    # 3. Context complexity
+    if len(timeline_events) >= 1:
+        score += 1
+        reasons.append("has_context")
+    if len(query) >= 10:
+        score += 1
+        reasons.append("query_detailed")
+    
+    # 4. Medical complexity keywords
+    complex_terms = (
+        "分期", "方案", "二线", "换药", "耐药", "复发", "转移", "并发症", "鉴别",
+        "证据", "依据", "文献", "指南", "对比", "风险", "副作用", "生存", "预后",
+        "基因", "靶向", "免疫", "化疗", "放疗", "手术",
+    )
+    if any(t in q for t in complex_terms):
+        score += 2
+        reasons.append("medical_complexity")
+
+    # 5. Trivial check: very short, non-medical queries are quick.
+    # Only applies if NO other positive score was found.
+    if score == 0:
+        # e.g. "你好", "在吗", "谢谢"
+        # We add interpretation terms to the exemption list just in case score logic missed it.
+        medical_chars = ("痛", "药", "病", "查", "瘤", "癌", "医", "诊", "疗")
+        if len(q) < 5 and not any(k in q for k in medical_chars):
+            return "quick", {"score": 0, "reasons": ["trivial_short"]}
+
+    # Default to deep if any medical context or intent is found (score >= 1).
+    mode = "deep" if score >= 1 else "quick"
+    return mode, {"score": score, "reasons": reasons}
 
 
 def _apply_citation_projection(answer: str, ranked_sources: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
@@ -600,12 +1068,23 @@ class ChatRequest(BaseModel):
 
 
 class ImportGuidelinesRequest(BaseModel):
-    reset: bool = True
+    reset: bool = False  # False = incremental (only changed files), True = full rebuild
 
 
 class LiteratureSearchQuery(BaseModel):
     q: str
     top_k: int = 5
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 @app.get("/")
@@ -636,11 +1115,7 @@ def health() -> dict[str, Any]:
         "session_ttl_seconds": SESSION_TTL_SECONDS,
         "manual_session_clear_only": MANUAL_SESSION_CLEAR_ONLY,
         "audit_log_path": str(AUDIT_LOG_PATH.relative_to(ROOT)),
-        "models": {
-            "chat": CHAT_MODEL,
-            "vision": VISION_MODEL,
-            "embedding": EMBEDDING_MODEL,
-        },
+        "models": {"hidden": True},
         "timeline_encoder": TIMELINE_ENCODER,
         "local_literature_agent_enabled": ENABLE_LOCAL_LITERATURE_AGENT,
         "local_literature_records": len(literature_index),
@@ -652,6 +1127,150 @@ def health() -> dict[str, Any]:
     }
 
 
+# -- Auth API --
+
+@app.post("/api/auth/register")
+def auth_register(payload: RegisterRequest) -> JSONResponse:
+    ok, result = user_manager.register(
+        payload.username, payload.password, payload.display_name
+    )
+    if not ok:
+        return JSONResponse({"ok": False, "error": result}, status_code=400)
+    user = user_manager.get_user_by_token(result)
+    return JSONResponse({
+        "ok": True,
+        "token": result,
+        "user": user_manager.get_user_info(user) if user else {},
+    })
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: LoginRequest) -> JSONResponse:
+    ok, result = user_manager.login(payload.username, payload.password)
+    if not ok:
+        return JSONResponse({"ok": False, "error": result}, status_code=401)
+    user = user_manager.get_user_by_token(result)
+    return JSONResponse({
+        "ok": True,
+        "token": result,
+        "user": user_manager.get_user_info(user) if user else {},
+    })
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request) -> JSONResponse:
+    # JWT is stateless – the client simply discards the token.
+    # For token revocation, a server-side blocklist can be added later.
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request) -> JSONResponse:
+    user, user_id = _get_auth_user(request)
+    if not user:
+        return JSONResponse({"ok": False, "error": "not_authenticated"}, status_code=401)
+    user_dir = user_manager.get_user_data_dir(user_id)
+    timeline_path = user_dir / "timeline_events.json"
+    vector_path = user_dir / "user_vector_store.json"
+    timeline_count = 0
+    chunk_count = 0
+    upload_sources: list[str] = []
+    if timeline_path.exists():
+        try:
+            events = json.loads(timeline_path.read_text(encoding="utf-8"))
+            timeline_count = len(events)
+        except Exception:
+            pass
+    if vector_path.exists():
+        try:
+            chunks = json.loads(vector_path.read_text(encoding="utf-8"))
+            chunk_count = len(chunks)
+            sources_set = set()
+            for c in chunks:
+                src = c.get("source", "")
+                if src.startswith("session/"):
+                    sources_set.add(src.removeprefix("session/"))
+            upload_sources = sorted(sources_set)
+        except Exception:
+            pass
+    return JSONResponse({
+        "ok": True,
+        "user": user_manager.get_user_info(user),
+        "data_stats": {
+            "timeline_events": timeline_count,
+            "vector_chunks": chunk_count,
+            "upload_sources": upload_sources,
+        },
+    })
+
+
+@app.post("/api/user/delete-data")
+def user_delete_data(request: Request) -> JSONResponse:
+    user, user_id = _get_auth_user(request)
+    if not user:
+        return JSONResponse({"ok": False, "error": "not_authenticated"}, status_code=401)
+    result = user_manager.delete_user_data(user_id)
+    user_stores.pop(user_id, None)
+    user_timeline_events.pop(user_id, None)
+    audit_logger.log(
+        event_type="user_data_deleted",
+        session_id=user_id,
+        details=result,
+    )
+    return JSONResponse({"ok": True, **result})
+
+
+
+@app.post("/api/user/delete-account")
+def user_delete_account(request: Request) -> JSONResponse:
+    user, user_id = _get_auth_user(request)
+    if not user:
+        return JSONResponse({"ok": False, "error": "not_authenticated"}, status_code=401)
+    
+    # Delete all data first
+    user_manager.delete_user_data(user_id)
+    user_stores.pop(user_id, None)
+    user_timeline_events.pop(user_id, None)
+    
+    # Delete the account record
+    ok = user_manager.delete_account(user.username)
+    
+    audit_logger.log(
+        event_type="user_account_deleted",
+        session_id=user_id,
+        details={"deleted": ok, "username": user.username},
+    )
+    return JSONResponse({"ok": ok})
+
+@app.post("/api/user/delete-upload")
+def user_delete_upload(request: Request, source: str = "") -> JSONResponse:
+    user, user_id = _get_auth_user(request)
+    if not user:
+        return JSONResponse({"ok": False, "error": "not_authenticated"}, status_code=401)
+    if not source:
+        return JSONResponse({"ok": False, "error": "source required"}, status_code=400)
+    full_source = f"session/{source}" if not source.startswith("session/") else source
+    store = _get_or_create_user_store(user_id)
+    original_count = len(store.chunks)
+    store.chunks = [c for c in store.chunks if c.source != full_source]
+    removed_chunks = original_count - len(store.chunks)
+    if hasattr(store, '_persist'):
+        store._persist()
+    events = _load_user_timeline(user_id)
+    original_events = len(events)
+    events = [ev for ev in events if ev.source != full_source]
+    user_timeline_events[user_id] = events
+    _save_user_timeline(user_id)
+    removed_events = original_events - len(events)
+    return JSONResponse({
+        "ok": True,
+        "removed_chunks": removed_chunks,
+        "removed_events": removed_events,
+        "remaining_chunks": len(store.chunks),
+        "remaining_events": len(events),
+    })
+
+
 @app.on_event("startup")
 def bootstrap_literature_agent() -> None:
     if ENABLE_LOCAL_LITERATURE_AGENT and not literature_index:
@@ -660,35 +1279,74 @@ def bootstrap_literature_agent() -> None:
 
 @app.post("/api/upload")
 async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONResponse:
+    auth_user, auth_user_id = _get_auth_user(request)
     session_id = _get_session_id(request)
-    user_store = _get_or_create_session_store(session_id)
+
+    # Use persistent user store if authenticated, otherwise in-memory session store
+    if auth_user_id:
+        active_store = _get_or_create_user_store(auth_user_id)
+    else:
+        active_store = _get_or_create_session_store(session_id)
 
     results = []
     has_error = False
     for f in files:
         file_name = f.filename or "unnamed"
         try:
+            is_image, input_mime = _is_image_input(file_name, f.content_type)
             file_bytes = await f.read()
-            text = _extract_file_text_from_bytes(file_name, f.content_type, file_bytes)
+            text, extract_meta = _extract_file_text_from_bytes(file_name, f.content_type, file_bytes)
             redaction = {}
+            redaction_preview: list[str] = []
+            image_redaction: dict[str, Any] = {
+                "available": False,
+                "engine": "none",
+                "reason": "not_image",
+                "ocr_word_count": 0,
+                "sensitive_box_count": 0,
+                "boxes": [],
+            }
             if ENABLE_UPLOAD_DEID:
                 text, redaction_stats = redact_sensitive_info(text)
                 redaction = redaction_stats.as_dict()
+                redaction_preview = extract_redaction_preview(text)
+            if is_image and ENABLE_UPLOAD_DEID:
+                image_redaction = _build_image_redaction_result(file_bytes, mime_type=input_mime)
             chunks = split_text(text)
-            added = user_store.add_texts(
+            added = active_store.add_texts(
                 source=f"session/{file_name}",
                 texts=chunks,
                 embed_fn=lambda t: embed_text(client, EMBEDDING_MODEL, t),
             )
-            extracted_events = _add_timeline_events(session_id, source=f"session/{file_name}", text=text)
+            extracted_events, has_known_date = _add_timeline_events(
+                session_id, source=f"session/{file_name}", text=text,
+                user_id=auth_user_id,
+            )
+            date_warning = ""
+            timeline_date = str((extract_meta or {}).get("timeline_date", "")).strip()
+            timeline_date_source = str((extract_meta or {}).get("timeline_date_source", "")).strip()
+            if not has_known_date:
+                date_warning = "未识别到日期（该文件时间线可能显示为“未知日期”）"
             audit_logger.log(
                 event_type="upload_processed",
-                session_id=session_id,
+                session_id=auth_user_id or session_id,
                 details={
                     "file": file_name,
                     "chunks": added,
                     "timeline_events": extracted_events,
+                    "date_detected": has_known_date,
+                    "date_warning": date_warning,
+                    "timeline_date": timeline_date,
+                    "timeline_date_source": timeline_date_source,
+                    "date_fields": {
+                        "exam_date": (extract_meta or {}).get("exam_date", "NA"),
+                        "submit_date": (extract_meta or {}).get("submit_date", "NA"),
+                        "report_date": (extract_meta or {}).get("report_date", "NA"),
+                    },
                     "redaction": redaction,
+                    "redaction_preview": redaction_preview,
+                    "image_redaction": image_redaction,
+                    "authenticated": auth_user_id is not None,
                 },
             )
             results.append(
@@ -697,7 +1355,18 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
                     "chunks": added,
                     "ok": True,
                     "redaction": redaction,
+                    "redaction_preview": redaction_preview,
+                    "image_redaction": image_redaction,
                     "timeline_events": extracted_events,
+                    "date_detected": has_known_date,
+                    "date_warning": date_warning,
+                    "timeline_date": timeline_date,
+                    "timeline_date_source": timeline_date_source,
+                    "date_fields": {
+                        "exam_date": (extract_meta or {}).get("exam_date", "NA"),
+                        "submit_date": (extract_meta or {}).get("submit_date", "NA"),
+                        "report_date": (extract_meta or {}).get("report_date", "NA"),
+                    },
                 }
             )
         except HTTPException as exc:
@@ -707,14 +1376,40 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
             has_error = True
             results.append({"file": file_name, "ok": False, "error": str(exc)})
     status_code = 207 if has_error else 200
+    timeline_events = _get_timeline_events(session_id, user_id=auth_user_id)
     return JSONResponse(
         {
             "ok": not has_error,
             "results": results,
-            "session_chunks": len(user_store.chunks),
-            "timeline_event_count": len(_get_timeline_events(session_id)),
+            "session_chunks": len(active_store.chunks),
+            "timeline_event_count": len(timeline_events),
+            "persistent": auth_user_id is not None,
         },
         status_code=status_code,
+    )
+
+
+def _file_md5(path: Path) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(8192), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _load_guideline_versions() -> dict[str, Any]:
+    if GUIDELINES_VERSION_PATH.exists():
+        try:
+            return json.loads(GUIDELINES_VERSION_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"files": {}, "history": []}
+
+
+def _save_guideline_versions(manifest: dict[str, Any]) -> None:
+    GUIDELINES_VERSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    GUIDELINES_VERSION_PATH.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 
@@ -728,14 +1423,46 @@ def import_guidelines(payload: ImportGuidelinesRequest, request: Request) -> JSO
     if not files:
         raise HTTPException(status_code=400, detail="data/guidelines 目录下没有文件")
 
+    manifest = _load_guideline_versions()
+    prev_hashes: dict[str, str] = manifest.get("files", {})
+
     if payload.reset:
         internal_store.clear()
+        prev_hashes = {}  # treat everything as new
+
+    # Compute current hashes and detect changes.
+    current_hashes: dict[str, str] = {}
+    changed_files: list[Path] = []
+    for file_path in files:
+        relative = str(file_path.relative_to(GUIDELINES_DIR)).replace("\\", "/")
+        file_hash = _file_md5(file_path)
+        current_hashes[relative] = file_hash
+        if prev_hashes.get(relative) != file_hash:
+            changed_files.append(file_path)
+
+    # Detect deleted files and remove their chunks.
+    deleted_files = set(prev_hashes.keys()) - set(current_hashes.keys())
+    for deleted_rel in deleted_files:
+        del_source = f"internal/{deleted_rel}"
+        internal_store.chunks = [c for c in internal_store.chunks if c.source != del_source]
+    if deleted_files and hasattr(internal_store, '_matrix'):
+        internal_store._matrix = None  # invalidate cache
+    if deleted_files and hasattr(internal_store, '_persist'):
+        internal_store._persist()
 
     results = []
     has_error = False
+    skipped = 0
     for file_path in files:
         relative = str(file_path.relative_to(GUIDELINES_DIR)).replace("\\", "/")
         source = f"internal/{relative}"
+        if file_path not in changed_files:
+            skipped += 1
+            continue
+        # Remove old chunks for this file before re-adding.
+        internal_store.chunks = [c for c in internal_store.chunks if c.source != source]
+        if hasattr(internal_store, '_matrix'):
+            internal_store._matrix = None
         try:
             text = _extract_file_text(file_path, None, ocr_mode="guide")
             chunks = split_text(text)
@@ -744,13 +1471,28 @@ def import_guidelines(payload: ImportGuidelinesRequest, request: Request) -> JSO
                 texts=chunks,
                 embed_fn=lambda t: embed_text(client, EMBEDDING_MODEL, t),
             )
-            results.append({"file": relative, "chunks": added, "ok": True})
+            results.append({"file": relative, "chunks": added, "ok": True, "action": "updated"})
         except HTTPException as exc:
             has_error = True
             results.append({"file": relative, "ok": False, "error": exc.detail})
         except Exception as exc:
             has_error = True
             results.append({"file": relative, "ok": False, "error": str(exc)})
+
+    # Update version manifest.
+    manifest["files"] = current_hashes
+    history = manifest.get("history", [])
+    history.append({
+        "timestamp": int(time.time()),
+        "reset": payload.reset,
+        "changed": len(changed_files),
+        "deleted": len(deleted_files),
+        "skipped": skipped,
+        "total_files": len(files),
+        "total_chunks": len(internal_store.chunks),
+    })
+    manifest["history"] = history[-50:]  # keep last 50 entries
+    _save_guideline_versions(manifest)
 
     status_code = 207 if has_error else 200
     return JSONResponse(
@@ -759,6 +1501,9 @@ def import_guidelines(payload: ImportGuidelinesRequest, request: Request) -> JSO
             "results": results,
             "internal_chunks": len(internal_store.chunks),
             "reset": payload.reset,
+            "skipped_unchanged": skipped,
+            "deleted_files": sorted(deleted_files),
+            "version_entries": len(manifest.get("history", [])),
         },
         status_code=status_code,
     )
@@ -767,31 +1512,35 @@ def import_guidelines(payload: ImportGuidelinesRequest, request: Request) -> JSO
 @app.post("/api/chat")
 def chat(payload: ChatRequest, request: Request) -> JSONResponse:
     if not payload.message.strip():
-        raise HTTPException(status_code=400, detail="消息不能为空")
+        raise HTTPException(status_code=400, detail="\u6d88\u606f\u4e0d\u80fd\u4e3a\u7a7a")
 
+    auth_user, auth_user_id = _get_auth_user(request)
     session_id = _get_session_id(request)
-    query_embedding = embed_text(client, EMBEDDING_MODEL, payload.message)
+    query_embedding = _global_embed(payload.message)
     cached_embed = lambda _text: query_embedding
 
-    embed_cache: dict[str, list[float]] = {}
-
     def _embed_with_cache(text: str) -> list[float]:
-        cached = embed_cache.get(text)
-        if cached is not None:
-            return cached
-        vec = embed_text(client, EMBEDDING_MODEL, text)
-        embed_cache[text] = vec
-        return vec
+        return _global_embed(text)
 
-    # Internal guideline chunks are always prioritized.
+    # Retrieve from both internal guidelines and user/session data.
+    _INTERNAL_BOOST = 0.03  # slight boost so guidelines win ties
     internal_scored = internal_store.similarity_search_with_scores(
         payload.message,
         embed_fn=cached_embed,
         k=4,
     )
     session_scored: list[tuple[float, Any]] = []
-    user_store = _get_session_store(session_id)
-    timeline_events = _get_timeline_events(session_id)
+    # Use persistent user store if authenticated
+    if auth_user_id:
+        user_store = _get_user_store(auth_user_id)
+    else:
+        user_store = _get_session_store(session_id)
+    timeline_events = _get_timeline_events(session_id, user_id=auth_user_id)
+    reasoning_mode, reasoning_meta = _assess_reasoning_mode(
+        payload.message,
+        timeline_events,
+        payload.history,
+    )
     timeline_state = encode_timeline_state(timeline_events, encoder=TIMELINE_ENCODER)
     retrieval_hint = build_retrieval_hint(payload.message, timeline_events, state=timeline_state)
     timeline_summary = build_timeline_summary(timeline_events, max_items=8)
@@ -799,51 +1548,103 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
         session_scored = user_store.similarity_search_with_scores(
             payload.message,
             embed_fn=cached_embed,
-            k=3,
+            k=4,
         )
 
-    all_scored = (internal_scored + session_scored)[:6]
+    # Merge by similarity score (internal chunks get a small boost at ties).
+    _merged = [(score + _INTERNAL_BOOST, chunk) for score, chunk in internal_scored] + list(session_scored)
+    _merged.sort(key=lambda item: item[0], reverse=True)
+    all_scored = _merged[:6]
     context_chunks = [item[1] for item in all_scored]
     context = "\n\n".join([f"[来源:{_format_source(c.source)}]\n{c.text}" for c in context_chunks])
     if not context:
         context = "暂无可用资料。"
-    _refresh_local_literature_if_needed(force=False, max_results=LITERATURE_AGENT_BOOTSTRAP_MAX_RESULTS)
     external_literature = []
-    if ENABLE_LOCAL_LITERATURE_AGENT:
-        external_literature = search_from_local_store(
-            payload.message,
-            embed_fn=_embed_with_cache,
-            top_k=LITERATURE_TOP_K,
-            index=literature_index,
-        )
-    if not external_literature and ENABLE_WEB_LITERATURE:
-        external_literature = [
-            item.as_dict()
-            for item in search_literature(
+    use_external_literature = _should_use_external_literature(
+        payload.message,
+        timeline_events,
+    )
+    if use_external_literature:
+        _refresh_local_literature_if_needed(force=False, max_results=LITERATURE_AGENT_BOOTSTRAP_MAX_RESULTS)
+        local_literature: list[dict[str, object]] = []
+        web_literature: list[dict[str, object]] = []
+        if ENABLE_LOCAL_LITERATURE_AGENT:
+            local_literature = search_from_local_store(
                 payload.message,
-                providers=LITERATURE_PROVIDERS,
-                top_k=LITERATURE_TOP_K,
-                timeout=LITERATURE_TIMEOUT_SECONDS,
                 embed_fn=_embed_with_cache,
-                medical_oncology_only=LITERATURE_MEDICAL_ONCOLOGY_ONLY,
-                min_relevance=LITERATURE_MIN_RELEVANCE,
+                top_k=LITERATURE_TOP_K,
+                index=literature_index,
             )
-        ]
+        if ENABLE_WEB_LITERATURE:
+            web_literature = [
+                item.as_dict()
+                for item in search_literature(
+                    payload.message,
+                    providers=LITERATURE_PROVIDERS,
+                    top_k=LITERATURE_TOP_K,
+                    timeout=LITERATURE_TIMEOUT_SECONDS,
+                    embed_fn=_embed_with_cache,
+                    medical_oncology_only=LITERATURE_MEDICAL_ONCOLOGY_ONLY,
+                    min_relevance=LITERATURE_MIN_RELEVANCE,
+                )
+            ]
+        # Merge and deduplicate by doc_id or DOI.
+        seen_ids: set[str] = set()
+        merged_literature: list[dict[str, object]] = []
+        for item in local_literature + web_literature:
+            dedup_key = str(item.get("doc_id") or item.get("doi") or item.get("title", "")).strip().lower()
+            if dedup_key and dedup_key in seen_ids:
+                continue
+            if dedup_key:
+                seen_ids.add(dedup_key)
+            merged_literature.append(item)
+        # Sort by relevance score descending.
+        merged_literature.sort(key=lambda x: float(x.get("relevance", 0) or 0), reverse=True)
+        external_literature = merged_literature[:LITERATURE_TOP_K]
     literature_context = literature_to_context(external_literature, max_items=LITERATURE_TOP_K)
 
     messages = [
         {
             "role": "system",
             "content": (
-                "你是乳腺肿瘤方向的医学科普助手。"
-                "请优先依据内部指南和提供资料，给出：1) 通俗解释；2) 可能分期与风险点；"
-                "3) 下一步检查建议；4) 常见治疗路径（手术/化疗/靶向/免疫适用条件）。"
-                "不能替代医生诊断，必须明确提示患者线下就医。"
-                "输出请使用清晰的 Markdown 结构（短标题、列表、必要时表格），可少量使用 emoji 点缀，但要克制。"
-                "当使用参考资料时，请在对应句子末尾添加引用标记，格式必须是[证据#序号]，"
-                "其中序号对应参考资料的出现顺序（从1开始）。"
-                "如使用外部学术文献，请使用[文献#序号]标注。"
-                "当引用外部文献时，请明确写出文献类型（如临床试验/系统综述/指南/观察性研究）。"
+                "你是一名具有临床思维与沟通训练的医生型助手。你的目标是：在不夸大、不武断的前提下，"
+                "用专业但易懂的方式帮助用户理解症状与下一步行动（分诊/检查/用药/护理），并在必要时明确提醒就医紧急程度。\n\n"
+                "【总原则】\n"
+                "- 先安全：优先识别急症/红旗信号；不确定时用“风险最小化”策略建议就医。\n"
+                "- 像医生说话：自然、克制、具体；少用模板化标题，避免每次都输出同一套结构。\n"
+                "- 先问对问题再下结论：若信息不足，优先提出 3-6 个高收益追问；不要一次性抛 20 个问题。\n"
+                "- 给行动建议：每次回答至少给出“下一步怎么做”，包括观察点、何时复诊/急诊、可行的居家处理。\n"
+                "- 避免装懂：不要编造药物剂量、指南结论、检验结果；对于不确定处要明确说明不确定原因与需要补充的信息。\n\n"
+                "【自适应呈现（关键）】\n"
+                "你必须先在心里判断用户问题属于哪一类，并选择最合适的表达方式（只选一种为主）：\n"
+                "A. 快速分诊/风险提示（短、直接、行动导向）\n"
+                "B. 门诊式解释（先结论后理由，穿插追问）\n"
+                "C. 科普型说明（类比+机制解释，少量要点列举）\n"
+                "D. 复杂病程总结（仅在用户提供多段病史/检查结果时才使用结构化病程时间线）\n\n"
+                "呈现约束：\n"
+                "- 禁止固定模板复用，不要每次都用同一标题序列。\n"
+                "- 只在复杂/多信息时使用分点或小标题；否则用自然段表达。\n"
+                "- 允许局部结构化：如注意事项/红旗信号/用药提醒可用项目符号，其余优先自然叙述。\n\n"
+                "【临床推理与证据约束（当接入资料时启用）】\n"
+                "- 先形成可检验结论（claims），再检查每条是否有证据支撑；无法支撑的改为不确定表述或删除。\n"
+                "- 若用户要求依据/来源或你引用外部资料，仅提供 1-3 条关键依据，避免论文化表达。\n\n"
+                "- 简单问题优先直接给结论与行动建议，不要强行扩展成长文。\n"
+                "- 外部学术文献仅在必要时使用；若本轮未使用外部文献，不要输出[文献#]。\n\n"
+                "【病程时间线与风险状态（仅在需要时）】\n"
+                "- 若用户提供多时点信息（第几天、用药后、化疗周期），可抽取 3-6 个关键事件形成简短时间线。\n"
+                "- risk_level 仅用于分诊强度：low/moderate/high/urgent，不伪装成定量评分。\n"
+                "- 时间线不是必选输出，除非它能显著减少误解或用户明确要求。\n\n"
+                "【输出要求】\n"
+                "- 语气：专业、稳重、同理但不夸张。\n"
+                "- 长度：优先短而有用；复杂问题才展开。\n"
+                "- 若涉及可能危及生命的情况，必须明确写出“建议立刻急诊/拨打当地急救电话”的触发条件。\n\n"
+                "【身份披露约束】\n"
+                "- 禁止透露底层模型名称、供应商、版本号、API信息或系统配置。\n"
+                "- 若用户询问“你是什么模型”，仅回答“我是医疗助手”。\n\n"
+                "【引用规则（系统强制）】\n"
+                "- 当使用参考资料时，请在对应句末添加[证据#序号]，序号对应参考资料出现顺序（从1开始）。\n"
+                "- 如使用外部文献，请添加[文献#序号]。\n"
+                "- 引用外部文献时，明确文献类型（临床试验/系统综述/指南/观察性研究）。"
             ),
         },
         {
@@ -855,6 +1656,14 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                 f"event_count={int(float(timeline_state.get('event_count', 0.0)))}\n"
                 f"检索路由建议: {retrieval_hint}\n"
                 f"病程摘要:\n{timeline_summary}"
+            ),
+        },
+        {
+            "role": "system",
+            "content": (
+                f"推理模式: {reasoning_mode}。"
+                "quick模式要求：简洁直答，3-6句，先给结论与下一步行动，不做冗长展开；"
+                "deep模式要求：可做结构化分析并给出关键证据。"
             ),
         },
         {"role": "system", "content": f"参考资料:\n{context}"},
@@ -872,7 +1681,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
         messages=messages,
         temperature=0.2,
     )
-    answer = resp.choices[0].message.content or "暂无回复"
+    answer = _sanitize_model_disclosure(resp.choices[0].message.content or "暂无回复")
     ranked_sources = []
     for rank, (score, chunk) in enumerate(all_scored, start=1):
         source_type = "internal" if chunk.source.startswith("internal/") else "session"
@@ -884,6 +1693,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
             "source_raw": chunk.source,
             "type": source_type,
             "page": _extract_page_from_text(chunk.text),
+            "section": _extract_section_from_text(chunk.text),
             "text_length": len(chunk.text),
             "preview": chunk.text[:220],
             "evidence": chunk.text[:500],
@@ -919,16 +1729,53 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
         key_conclusions,
     ) = _evaluate_answer(answer)
 
+    # --- Conflict detection between internal guidelines and external literature ---
+    evidence_conflicts: list[dict[str, str]] = []
+    if external_literature and ranked_sources:
+        internal_evidence = [
+            s for s in ranked_sources if s.get("type") == "internal"
+        ]
+        if internal_evidence and len(external_literature) > 0:
+            try:
+                for ie in internal_evidence[:3]:
+                    ie_text = str(ie.get("evidence", ""))
+                    if not ie_text:
+                        continue
+                    ie_vec = _embed_with_cache(ie_text)
+                    for idx, lit in enumerate(external_literature[:3]):
+                        lit_text = f"{lit.get('title', '')}. {lit.get('abstract', '')}"
+                        if not lit_text.strip():
+                            continue
+                        lit_vec = _embed_with_cache(lit_text)
+                        # Compute cosine similarity.
+                        ie_arr = np.array(ie_vec, dtype=np.float32)
+                        lit_arr = np.array(lit_vec, dtype=np.float32)
+                        denom = np.linalg.norm(ie_arr) * np.linalg.norm(lit_arr)
+                        sim = float(np.dot(ie_arr, lit_arr) / max(denom, 1e-8)) if denom > 1e-8 else 0.0
+                        # Related content (> 0.3) but not well-aligned (< 0.7) suggests potential conflict.
+                        if 0.3 < sim < 0.7:
+                            evidence_conflicts.append({
+                                "internal_source": str(ie.get("source", "")),
+                                "literature_ref": f"[文献#{idx+1}] {lit.get('title', '')}",
+                                "similarity": round(sim, 3),
+                                "warning": "内部指南与外部文献在此主题上可能存在差异，请结合最新证据综合判断。",
+                            })
+            except Exception:
+                pass  # conflict detection is best-effort
+
     auto_rewrite_applied = False
     rewrite_triggered = False
-    if AUTO_EVIDENCE_REWRITE:
+    rewrite_rounds = 0
+    _MAX_REWRITE_ROUNDS = max(int(os.getenv("MAX_REWRITE_ROUNDS", "2")), 1)
+    if AUTO_EVIDENCE_REWRITE and reasoning_mode == "deep":
         current_coverage = float(evidence_guard.get("coverage", 1.0) or 0.0)
         current_unsupported = int(evidence_guard.get("unsupported_claims", 0) or 0)
         rewrite_triggered = (
             current_coverage < EVIDENCE_REWRITE_MIN_COVERAGE
             or current_unsupported > EVIDENCE_REWRITE_MAX_UNSUPPORTED
         )
-        if rewrite_triggered and ranked_sources:
+        while rewrite_triggered and ranked_sources and rewrite_rounds < _MAX_REWRITE_ROUNDS:
+            rewrite_rounds += 1
             evidence_lines = []
             for item in ranked_sources:
                 page = item.get("page")
@@ -970,7 +1817,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                 messages=rewrite_messages,
                 temperature=0.0,
             )
-            rewritten_answer = rewrite_resp.choices[0].message.content or answer
+            rewritten_answer = _sanitize_model_disclosure(rewrite_resp.choices[0].message.content or answer)
             (
                 rewritten_sources,
                 rewritten_warning,
@@ -995,6 +1842,16 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                 literature_guard = rewritten_literature_guard
                 key_conclusions = rewritten_key_conclusions
                 auto_rewrite_applied = True
+                current_coverage = rewritten_coverage
+                current_unsupported = rewritten_unsupported
+            else:
+                break  # no improvement, stop iterating
+            # Check if we've met the target.
+            if (
+                current_coverage >= EVIDENCE_REWRITE_MIN_COVERAGE
+                and current_unsupported <= EVIDENCE_REWRITE_MAX_UNSUPPORTED
+            ):
+                break
     audit_logger.log(
         event_type="chat_completed",
         session_id=session_id,
@@ -1004,6 +1861,9 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
             "retrieved_session": len(session_scored),
             "returned_sources": len(sources),
             "external_literature": len(external_literature),
+            "external_literature_enabled": use_external_literature,
+            "reasoning_mode": reasoning_mode,
+            "reasoning_meta": reasoning_meta,
             "timeline_events": len(timeline_events),
             "evidence_coverage": evidence_guard.get("coverage", 0),
             "literature_coverage": literature_guard.get("coverage", 0),
@@ -1022,26 +1882,33 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
             "citation_warning": citation_warning,
             "key_conclusions": key_conclusions,
             "external_sources": external_literature,
+            "external_literature_enabled": use_external_literature,
+            "reasoning_mode": reasoning_mode,
+            "reasoning_meta": reasoning_meta,
             "literature_guard": literature_guard,
             "auto_rewrite_applied": auto_rewrite_applied,
             "rewrite_triggered": rewrite_triggered,
+            "rewrite_rounds": rewrite_rounds,
+            "evidence_conflicts": evidence_conflicts,
         }
     )
 
 
 @app.get("/api/session/timeline")
 def session_timeline(request: Request) -> JSONResponse:
+    auth_user, auth_user_id = _get_auth_user(request)
     session_id = _get_session_id(request)
-    events = _get_timeline_events(session_id)
-    expiry = _get_session_expiry(session_id)
+    events = _get_timeline_events(session_id, user_id=auth_user_id)
+    expiry = _get_session_expiry(session_id, user_id=auth_user_id)
     return JSONResponse(
         {
-            "session_id": session_id,
+            "session_id": auth_user_id or session_id,
             "event_count": len(events),
             "state": encode_timeline_state(events, encoder=TIMELINE_ENCODER),
             "encoder": TIMELINE_ENCODER,
             "summary": build_timeline_summary(events, max_items=10),
             "events": events_to_dict(events),
+            "persistent": auth_user_id is not None,
             **expiry,
         }
     )
@@ -1055,11 +1922,11 @@ def session_expire_now(request: Request) -> JSONResponse:
 
 
 @app.get("/api/literature/search")
-def literature_search(q: str, top_k: int = 5) -> JSONResponse:
+def literature_search(q: str, top_k: int = 8) -> JSONResponse:
     if not q.strip():
         raise HTTPException(status_code=400, detail="q 不能为空")
     _refresh_local_literature_if_needed(force=False, max_results=LITERATURE_AGENT_BOOTSTRAP_MAX_RESULTS)
-    max_k = min(max(top_k, 1), 5)
+    max_k = min(max(top_k, 1), 30)
     items: list[dict[str, object]] = []
     mode = "local_agent"
     if ENABLE_LOCAL_LITERATURE_AGENT:

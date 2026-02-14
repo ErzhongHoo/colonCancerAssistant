@@ -1,736 +1,2695 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>结直肠病例助手</title>
-    <style>
-      :root {
-        --bg: #e9eff5;
-        --bg-2: #dde7f2;
-        --panel: #ffffff;
-        --line: #cfdaea;
-        --text: #11263f;
-        --muted: #5a6f8d;
-        --primary: #0d6cf2;
-        --primary-2: #0a53bf;
-        --good: #127c52;
-        --bad: #b63038;
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>结直肠病例助手</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+    :root {
+      --bg-body: #f0f4f9;
+      --bg-surface: #ffffff;
+      --bg-sidebar: #f0f4f9;
+      --primary: #0b57d0;
+      --primary-hover: #0842a0;
+      --on-primary: #ffffff;
+      --text-primary: #1e1f20;
+      --text-secondary: #444746;
+      --text-muted: #75797d;
+      --border-subtle: #e1e3e1;
+      --radius-xl: 24px;
+      --radius-l: 16px;
+      --radius-m: 12px;
+      --radius-s: 8px;
+      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      --font-main: "Inter", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+      /* Legacy variable mappings to prevent breakage */
+      --bg: var(--bg-body);
+      --bg-2: var(--bg-sidebar);
+      --panel: var(--bg-surface);
+      --line: var(--border-subtle);
+      --text: var(--text-primary);
+      --muted: var(--text-muted);
+      --good: #127c52;
+      --bad: #b63038;
+    }
+
+    * {
+      box-sizing: border-box;
+      outline: none;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg-body);
+      color: var(--text-primary);
+      font-family: var(--font-main);
+      line-height: 1.6;
+      height: 100vh;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      height: 100vh;
+      max-width: 1920px;
+      margin: 0 auto;
+    }
+
+    /* Sidebar (Rail) */
+    .rail {
+      background: var(--bg-sidebar);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+      border-right: 1px solid transparent;
+    }
+
+    .rail::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .rail::-webkit-scrollbar-thumb {
+      background: #dcdcdc;
+      border-radius: 4px;
+    }
+
+    /* Main Chat Area */
+    .center {
+      background: var(--bg-surface);
+      margin: 16px 16px 16px 0;
+      border-radius: var(--radius-xl);
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.04), 0 2px 6px rgba(0, 0, 0, 0.05);
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Sidebar Cards */
+    .card {
+      background: var(--bg-surface);
+      border: none;
+      border-radius: var(--radius-l);
+      padding: 16px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      transition: box-shadow 0.2s;
+    }
+
+    .card:hover {
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    }
+
+    /* Main content wrapper card removal/reset */
+    .center .card {
+      border: none;
+      box-shadow: none;
+      height: 100%;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      background: transparent;
+    }
+
+    .center .card h2 {
+      display: none;
+    }
+
+    h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin: 0 0 12px 0;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+
+    /* Typography Utilities */
+    .muted {
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    /* Buttons & Interactive */
+    .btn,
+    #send-btn {
+      background: var(--primary);
+      color: var(--on-primary);
+      border: none;
+      border-radius: 999px;
+      padding: 10px 24px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .btn:hover,
+    #send-btn:hover {
+      background: var(--primary-hover);
+      box-shadow: 0 2px 4px rgba(11, 87, 208, 0.25);
+      transform: translateY(-1px);
+    }
+
+    .btn:disabled,
+    #send-btn:disabled {
+      background: #e3e3e3;
+      color: #a8a8a8;
+      cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
+    }
+
+    .btn-secondary {
+      background: #e7f0fe;
+      color: var(--primary);
+    }
+
+    .btn-secondary:hover {
+      background: #dbe9fd;
+      color: var(--primary-hover);
+      box-shadow: none;
+    }
+
+    .mini-btn {
+      border: 0;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      background: #fce8e8;
+      color: #c5221f;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .mini-btn:hover {
+      background: #f9dbe0;
+    }
+
+    /* Form Elements */
+    input[type="text"],
+    input[type="password"],
+    input[type="file"],
+    #message {
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-s);
+      padding: 10px 14px;
+      font-size: 14px;
+      color: var(--text-primary);
+      background: #fff;
+      transition: all 0.2s;
+      font-family: inherit;
+      width: 100%;
+    }
+
+    input:focus,
+    #message:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px rgba(11, 87, 208, 0.1);
+    }
+
+    input[type="file"] {
+      background: #f8f9fa;
+      cursor: pointer;
+    }
+
+    /* Chat Box Layout */
+    #chat-box {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 10% 40px 10%;
+      scroll-behavior: smooth;
+      background: transparent;
+      border: none;
+    }
+
+    .msg {
+      max-width: 800px;
+      margin: 0 auto 24px auto;
+      font-size: 16px;
+      line-height: 1.6;
+      width: 100%;
+      color: var(--text-primary);
+      animation: fadeIn 0.3s ease-out;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(5px);
       }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        color: var(--text);
-        font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-        background:
-          radial-gradient(700px 380px at 0% 0%, #f5f9ff 0, transparent 80%),
-          radial-gradient(650px 320px at 100% 100%, #f8fbff 0, transparent 72%),
-          linear-gradient(160deg, var(--bg-2) 0%, var(--bg) 45%, #edf2f8 100%);
-      }
-      .layout {
-        height: 100vh;
-        display: grid;
-        grid-template-columns: 300px 1fr;
-        gap: 14px;
-        padding: 14px;
-      }
-      .rail, .center {
-        min-height: 0;
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-      }
-      .card {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        padding: 14px;
-        box-shadow: 0 8px 18px rgba(15, 38, 70, 0.05);
-      }
-      .card h2 {
-        margin: 0 0 10px;
-        font-size: 15px;
-      }
-      .muted { color: var(--muted); font-size: 12px; }
-      .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-      .kpi { border: 1px solid var(--line); border-radius: 10px; background: #f7fbff; padding: 8px; }
-      .kpi .label { font-size: 11px; color: var(--muted); }
-      .kpi .value { font-size: 14px; font-weight: 700; margin-top: 2px; }
-      .risk-pill {
-        display: inline-block;
-        border-radius: 999px;
-        padding: 3px 8px;
-        font-size: 11px;
-        font-weight: 700;
-        border: 1px solid transparent;
-      }
-      .risk-low { color: #1c6a4c; background: #e8f7ef; border-color: #bde4cd; }
-      .risk-moderate { color: #8a5a0d; background: #fff4dd; border-color: #efd7a5; }
-      .risk-high { color: #9f1f2d; background: #fde8eb; border-color: #efbbc3; }
-      .stack {
-        max-height: 220px;
-        overflow: auto;
-        margin: 8px 0 0;
-        padding: 0;
-        list-style: none;
-      }
-      .stack li {
-        border: 1px solid #d6e1f0;
-        background: #f9fcff;
-        border-radius: 10px;
-        padding: 8px;
-        margin-bottom: 8px;
-        font-size: 12px;
-        line-height: 1.5;
-      }
-      .timeline-item { border-left: 3px solid #80aeea; padding-left: 10px; }
-      .steps { margin-top: 8px; display: grid; gap: 6px; }
-      .step {
-        border-radius: 9px;
-        padding: 7px 9px;
-        font-size: 12px;
-        border: 1px solid #d5deec;
-        background: #f5f8fc;
-      }
-      .step.on { background: #e9f3ff; border-color: #add0ff; color: #12488c; }
-      .step.done { background: #e8f7ef; border-color: #bce5cc; color: #145c40; }
-      .btn, #send-btn {
-        border: 0;
-        border-radius: 10px;
-        padding: 10px 12px;
-        font-weight: 700;
-        cursor: pointer;
-      }
-      .btn, #send-btn { background: var(--primary); color: #fff; }
-      .btn:hover, #send-btn:hover { background: var(--primary-2); }
-      .btn:disabled, #send-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-      .btn-secondary { background: #0f8c59; }
-      .btn-secondary:hover { background: #0a7448; }
-      input[type="file"], input[type="password"], #message {
-        width: 100%;
-        border: 1px solid #ccd8ea;
-        border-radius: 10px;
-        padding: 9px 10px;
-        background: #fff;
-      }
-      #chat-box {
-        flex: 1;
-        overflow: auto;
-        background: linear-gradient(180deg, #f9fcff 0%, #f3f8ff 100%);
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        padding: 14px;
-      }
-      .msg {
-        max-width: 90%;
-        margin-bottom: 10px;
-        padding: 11px 12px;
-        border-radius: 11px;
-        line-height: 1.55;
-        font-size: 14px;
-      }
-      .msg.user { margin-left: auto; border: 1px solid #b8d4ff; background: #eaf3ff; }
-      .msg.assistant { border: 1px solid #d5deee; background: #f8fbff; }
-      .composer { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
-      .source-row { color: #1758c9; text-decoration: underline; cursor: pointer; }
-      .round-meta {
-        margin-top: 8px;
-        border-top: 1px dashed #c9d7ef;
-        padding-top: 6px;
-        font-size: 12px;
-      }
-      .round-meta-summary {
-        color: #1758c9;
-        text-decoration: underline;
-        cursor: default;
-      }
-      .round-meta-panel {
-        margin-top: 6px;
-        max-height: none;
+
+      to {
         opacity: 1;
-        overflow: visible;
+        transform: translateY(0);
       }
-      .round-meta-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
+    }
+
+    .msg.user {
+      width: fit-content;
+      max-width: 80%;
+      margin-left: auto;
+      background: #e7f0fe;
+      padding: 14px 20px;
+      border-radius: 20px 20px 4px 20px;
+      border: none;
+    }
+
+    .msg.assistant {
+      background: transparent;
+      border: none;
+      padding-left: 0;
+    }
+
+    /* Markdown Content Styling */
+    /* Markdown Content Styling */
+    .msg.assistant {
+      font-size: 15px;
+      color: var(--text-primary);
+    }
+
+    .msg.assistant h1,
+    .msg.assistant h2,
+    .msg.assistant h3,
+    .msg.assistant h4 {
+      margin-top: 24px;
+      margin-bottom: 12px;
+      font-weight: 600;
+      line-height: 1.4;
+      color: var(--text-primary);
+    }
+
+    .msg.assistant h1 {
+      font-size: 1.5em;
+      color: var(--primary);
+      border-bottom: 1px solid #e1e3e1;
+      padding-bottom: 8px;
+    }
+
+    .msg.assistant h2 {
+      font-size: 1.25em;
+    }
+
+    .msg.assistant h3 {
+      font-size: 1.1em;
+      color: var(--text-secondary);
+    }
+
+    .msg.assistant p {
+      margin-bottom: 12px;
+      line-height: 1.6;
+      color: var(--text-primary);
+    }
+
+    .msg.assistant ul,
+    .msg.assistant ol {
+      margin-bottom: 16px;
+      padding-left: 24px;
+      color: var(--text-primary);
+    }
+
+    .msg.assistant li {
+      margin-bottom: 6px;
+      line-height: 1.6;
+    }
+
+    .msg.assistant strong {
+      font-weight: 700;
+      color: var(--primary);
+      /* Highlight key points with primary color */
+    }
+
+    .msg.assistant code {
+      background: #f1f3f4;
+      padding: 2px 6px;
+      border-radius: 6px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+      font-size: 0.9em;
+      color: #c5221f;
+    }
+
+    .msg.assistant pre {
+      background: #f8f9fa;
+      padding: 16px;
+      border-radius: 12px;
+      overflow-x: auto;
+      border: 1px solid var(--border-subtle);
+      margin: 12px 0;
+    }
+
+    .msg.assistant pre code {
+      background: transparent;
+      padding: 0;
+      color: inherit;
+      border-radius: 0;
+    }
+
+    .msg.assistant blockquote {
+      border-left: 4px solid #dfe3e7;
+      background: #fff;
+      margin: 16px 0;
+      padding: 8px 16px;
+      color: var(--text-secondary);
+    }
+
+    .msg.assistant table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      font-size: 14px;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border-subtle);
+    }
+
+    .msg.assistant th,
+    .msg.assistant td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border-subtle);
+      text-align: left;
+    }
+
+    .msg.assistant th {
+      background: #f8f9fa;
+      font-weight: 600;
+      color: var(--text-secondary);
+    }
+
+    .msg.assistant tr:last-child td {
+      border-bottom: none;
+    }
+
+    /* Composer (Input Area) */
+    .composer {
+      background: #fff;
+      padding: 16px 10%;
+      border-top: 1px solid #f0f0f0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      position: sticky;
+      bottom: 0;
+      z-index: 10;
+    }
+
+    #message {
+      background: #f0f4f9;
+      border: none;
+      border-radius: 999px;
+      padding: 16px 24px;
+      font-size: 16px;
+      flex: 1;
+    }
+
+    #message:focus {
+      background: #e9eef6;
+      box-shadow: none;
+    }
+
+    #send-btn {
+      padding: 12px 24px;
+    }
+
+    /* Status/KPI Widgets */
+    .kpis {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .kpi {
+      flex: 1;
+      background: #f8f9fa;
+      border-radius: var(--radius-m);
+      padding: 10px;
+      text-align: center;
+      border: 1px solid transparent;
+    }
+
+    .kpi .label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+    }
+
+    .kpi .value {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .risk-pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+
+    .risk-low {
+      color: #0f5132;
+      background: #d1e7dd;
+    }
+
+    .risk-moderate {
+      color: #664d03;
+      background: #fff3cd;
+    }
+
+    .risk-high {
+      color: #842029;
+      background: #f8d7da;
+    }
+
+    /* Timeline Items */
+    .stack {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .stack li {
+      background: #ffffff;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-m);
+      padding: 12px;
+      margin-bottom: 8px;
+      font-size: 13px;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+
+    .stack li:hover {
+      transform: translateX(2px);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .timeline-day {
+      background: #f8f9fa;
+      border-radius: var(--radius-m);
+      padding: 10px;
+      margin-bottom: 8px;
+      border: 1px solid transparent;
+    }
+
+    .timeline-day-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+      cursor: pointer;
+    }
+
+    .timeline-day-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+
+    .timeline-day-events {
+      margin: 8px 0 0 8px;
+      padding-left: 10px;
+      border-left: 2px solid #e1e3e1;
+    }
+
+    .timeline-day-events li {
+      background: transparent !important;
+      border: none !important;
+      padding: 4px 0 !important;
+      margin: 0 !important;
+      font-size: 13px !important;
+      box-shadow: none !important;
+      transform: none !important;
+    }
+
+    .risk-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 6px;
+    }
+
+    .risk-dot.low {
+      background: #198754;
+    }
+
+    .risk-dot.moderate {
+      background: #fd7e14;
+    }
+
+    .risk-dot.high {
+      background: #dc3545;
+    }
+
+    .risk-dot.info {
+      background: #0d6efd;
+    }
+
+    .risk-dot.unknown {
+      background: #adb5bd;
+    }
+
+    /* Steps / Lifecycle */
+    .steps {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .step {
+      border-radius: var(--radius-s);
+      padding: 8px 12px;
+      font-size: 12px;
+      border: 1px solid var(--border-subtle);
+      background: #fff;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+    }
+
+    .step.on {
+      background: #e7f0fe;
+      border-color: transparent;
+      color: var(--primary);
+      font-weight: 600;
+    }
+
+    .step.done {
+      background: #e6f4ea;
+      border-color: transparent;
+      color: #137333;
+    }
+
+    /* Thinking Indicator */
+    .thinking-indicator {
+      display: none;
+      align-items: center;
+      gap: 12px;
+      background: #f0f4f9;
+      border-radius: var(--radius-l);
+      padding: 12px 16px;
+      margin: 0 auto 16px auto;
+      max-width: 800px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      border: 1px solid transparent;
+      animation: pulseSubtle 2s infinite;
+    }
+
+    .thinking-indicator.on {
+      display: flex;
+    }
+
+    @keyframes pulseSubtle {
+      0% {
+        opacity: 0.8;
       }
-      .ext-link {
-        color: #1758c9;
-        text-decoration: underline;
+
+      50% {
+        opacity: 1;
       }
-      .conclusion-card {
-        border: 1px solid #d6e2f8;
-        border-radius: 8px;
-        background: #f7fbff;
-        padding: 6px 8px;
-        margin-bottom: 6px;
+
+      100% {
+        opacity: 0.8;
       }
-      .conclusion-detail {
-        margin-top: 4px;
+    }
+
+    /* Round Meta / Evidence Cards */
+    .round-meta {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #f0f0f0;
+      font-size: 13px;
+    }
+
+    .round-meta-summary {
+      color: var(--primary);
+      cursor: default;
+      font-weight: 500;
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+
+    .round-meta-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 12px;
+    }
+
+    .conclusion-card {
+      background: #f8f9fa;
+      border-radius: var(--radius-s);
+      padding: 10px;
+      border: 1px solid #f0f0f0;
+      margin-bottom: 8px;
+    }
+
+    /* Misc */
+    .slim summary {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      padding: 4px 0;
+    }
+
+    .ttl-banner {
+      background: #e7f0fe;
+      color: #0b57d0;
+      border-radius: var(--radius-s);
+      padding: 8px 12px;
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .ttl-banner.expired {
+      background: #fce8e8;
+      color: #c5221f;
+    }
+
+    @media (max-width: 980px) {
+      .layout {
+        grid-template-columns: 1fr;
+        height: auto;
+        display: block;
       }
-      .suff-high { color: #127c52; font-weight: 700; }
-      .suff-medium { color: #9a6700; font-weight: 700; }
-      .suff-low { color: #b63038; font-weight: 700; }
-      .mini-list {
+
+      .rail {
+        max-height: 400px;
+        border-bottom: 1px solid var(--border-subtle);
+        border-right: none;
+      }
+
+      .center {
         margin: 0;
-        padding-left: 16px;
+        box-shadow: none;
+        border-radius: 0;
+        height: auto;
+        min-height: 500px;
       }
-      .mini-list li {
-        margin-bottom: 4px;
-      }
-      .check-pass { color: var(--good); font-weight: 700; }
-      .check-fail { color: var(--bad); font-weight: 700; }
-      .proof-ok { color: var(--good); font-weight: 700; }
-      .badge {
-        border-radius: 999px;
-        font-size: 11px;
-        padding: 2px 8px;
-        background: #eaf2ff;
-        border: 1px solid #bed5fd;
-        color: #184d9a;
-        margin-left: 6px;
-      }
-      .ttl-banner {
-        border: 1px solid #c7d6ee;
-        background: linear-gradient(90deg, #eef4ff 0%, #f6f9ff 100%);
-        border-radius: 10px;
-        padding: 8px 10px;
-        font-size: 12px;
-        color: #24426f;
-        margin-bottom: 8px;
-        display: flex;
-        justify-content: space-between;
-        gap: 8px;
-        align-items: center;
-      }
-      .ttl-banner.expired {
-        border-color: #9cd7bb;
-        background: linear-gradient(90deg, #e8fff2 0%, #f2fff8 100%);
-        color: #145a3d;
-      }
-      .mini-btn {
-        border: 0;
-        border-radius: 8px;
-        padding: 6px 9px;
-        font-size: 12px;
-        font-weight: 700;
-        background: #d74747;
-        color: #fff;
-        cursor: pointer;
-      }
-      .mini-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-      details.slim > summary {
-        cursor: pointer;
-        color: var(--muted);
-        font-size: 12px;
-        font-weight: 600;
-      }
-      @media (max-width: 980px) {
-        .layout { height: auto; grid-template-columns: 1fr; }
-        .stack { max-height: none; }
-      }
-    </style>
-  </head>
-  <body>
-    <div class="layout">
-      <aside class="rail">
-        <div class="card">
-          <h2>病例上传</h2>
-          <div class="muted">支持 PDF/图片/txt。当前页面会话隔离，刷新后自动失效。</div>
-          <input id="file-input" type="file" multiple style="margin-top:8px" />
-          <button id="upload-btn" class="btn" style="width:100%;margin-top:8px">上传并入库</button>
-          <ul id="files-list" class="stack"></ul>
-        </div>
 
-        <div class="card">
-          <h2>病程时间线 <span id="risk-pill" class="risk-pill risk-low">LOW</span></h2>
-          <div class="kpis">
-            <div class="kpi"><div class="label">Risk Score</div><div id="kpi-risk-score" class="value">0.00</div></div>
-            <div class="kpi"><div class="label">Event Count</div><div id="kpi-events" class="value">0</div></div>
-            <div class="kpi"><div class="label">High Risk</div><div id="kpi-high-risk" class="value">0</div></div>
-          </div>
-          <ul id="timeline-list" class="stack"></ul>
-        </div>
+      .composer {
+        position: sticky;
+        bottom: 0;
+      }
 
-        <div class="card">
-          <h2>数据生命周期</h2>
-          <div id="ttl-banner" class="ttl-banner">
-            <span id="ttl-banner-text">当前为手动清除模式：数据不会自动过期</span>
-            <button id="expire-now-btn" class="mini-btn">手动清除会话数据</button>
-          </div>
-          <div class="muted" id="session-id-text">会话ID：-</div>
-          <div class="steps">
-            <div id="step-upload" class="step">1) 上传接收</div>
-            <div id="step-redact" class="step">2) 隐私脱敏</div>
-            <div id="step-session" class="step">3) 会话临时库</div>
-            <div id="step-ttl" class="step">4) TTL 销毁证明</div>
-          </div>
-          <ul id="ttl-proof-list" class="stack" style="max-height:140px"></ul>
-        </div>
+      .stack {
+        max-height: none;
+      }
+    }
 
-        <details class="card slim">
-          <summary>内部维护（可选）</summary>
-          <div class="muted" style="margin-top:8px">导入 `data/guidelines` 到内部持久化知识库。</div>
-          <input id="internal-token" type="password" placeholder="内部令牌（可选）" style="margin-top:8px" />
-          <label class="muted" style="display:block;margin-top:8px">
-            <input id="internal-reset" type="checkbox" checked /> 重建内部库（reset=true）
-          </label>
-          <button id="import-guidelines-btn" class="btn btn-secondary" style="width:100%;margin-top:8px">导入内部指南</button>
-          <ul id="internal-import-list" class="stack" style="max-height:120px"></ul>
-        </details>
-      </aside>
+    /* Redaction Stats */
+    .redact-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
 
-      <main class="center">
-        <div class="card" style="padding-bottom:10px">
-          <h2>医学问答区 <span class="badge">RAG + Timeline Routing</span></h2>
-          <div id="chat-box"></div>
-          <div class="composer" style="margin-top:10px">
-            <input id="message" placeholder="输入问题，例如：目前分期风险如何？下一步治疗路径建议？" />
-            <button id="send-btn">发送</button>
-          </div>
-          <div class="muted" style="margin-top:8px">每条助手回复尾部可悬停查看本轮证据与校验。</div>
+    .redact-stat {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+    }
+
+    .redact-stat.zero {
+      opacity: 0.5;
+      background: #f0f0f0;
+      color: #888;
+      border-color: #ddd;
+    }
+
+    .redact-tag-id_card {
+      color: #9f1f2d;
+      background: #fde8eb;
+    }
+
+    .redact-tag-phone {
+      color: #8a4a00;
+      background: #fff3e0;
+    }
+
+    .redact-tag-email {
+      color: #184d9a;
+      background: #e4efff;
+    }
+
+    .redact-tag-bank_card {
+      color: #6d28aa;
+      background: #f3edff;
+    }
+
+    .redact-tag-name_field {
+      color: #127c52;
+      background: #e8f7ef;
+    }
+
+    .redact-tag-address_field {
+      color: #0e7c8a;
+      background: #e4f7f9;
+    }
+
+
+    /* Upload Progress */
+    .upload-progress {
+      display: none;
+      margin-top: 10px;
+    }
+
+    .upload-progress.on {
+      display: block;
+    }
+
+    .progress-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+
+    .progress-header .progress-label {
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .progress-header .progress-timer {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .progress-bar-track {
+      width: 100%;
+      height: 6px;
+      background: #e9ecef;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #4285f4, #34a853);
+      border-radius: 999px;
+      transition: width 0.4s ease;
+    }
+
+    .progress-steps {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 6px;
+    }
+
+    .progress-step-tag {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #f0f0f0;
+      color: #888;
+      transition: all 0.3s;
+    }
+
+    .progress-step-tag.active {
+      background: #e7f0fe;
+      color: #1967d2;
+      animation: pulseSubtle 1.5s infinite;
+    }
+
+    .progress-step-tag.done {
+      background: #e6f4ea;
+      color: #137333;
+    }
+
+    .progress-file-status {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 4px;
+      min-height: 16px;
+    }
+
+    /* Fixes for internal elements */
+    .thinking-left {
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .thinking-dots-inline {
+      display: inline-flex;
+      gap: 3px;
+    }
+
+    .thinking-dots-inline span {
+      width: 4px;
+      height: 4px;
+      background: var(--primary);
+      border-radius: 50%;
+      opacity: 0.5;
+      animation: ping 1s infinite alternate;
+    }
+
+    .thinking-dots-inline span:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+
+    .thinking-dots-inline span:nth-child(3) {
+      animation-delay: 0.4s;
+    }
+
+    @keyframes ping {
+      from {
+        transform: scale(1);
+        opacity: 0.5;
+      }
+
+      to {
+        transform: scale(1.5);
+        opacity: 1;
+      }
+    }
+
+    .typing-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .typing-dots span {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--text-secondary);
+      opacity: 0.4;
+      animation: typingPulse 1s infinite ease-in-out;
+    }
+
+    .typing-dots span:nth-child(2) {
+      animation-delay: 0.15s;
+    }
+
+    .typing-dots span:nth-child(3) {
+      animation-delay: 0.3s;
+    }
+
+    @keyframes typingPulse {
+
+      0%,
+      100% {
+        opacity: 0.4;
+        transform: translateY(0);
+      }
+
+      50% {
+        opacity: 1;
+        transform: translateY(-2px);
+      }
+    }
+
+    /* ── Auth Modal (inside modal-overlay) ──────── */
+    #auth-modal .modal-box {
+      width: 420px;
+    }
+
+    #auth-modal .auth-form-title {
+      font-size: 22px;
+      font-weight: 700;
+      margin: 0 0 4px;
+      text-transform: none;
+      letter-spacing: 0;
+      color: var(--text-primary);
+    }
+
+    #auth-modal .auth-form-sub {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 20px;
+    }
+
+    #auth-modal label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 5px;
+      margin-top: 14px;
+    }
+
+    #auth-modal input[type="text"],
+    #auth-modal input[type="password"] {
+      width: 100%;
+      padding: 11px 14px;
+      border: 1.5px solid var(--border-subtle);
+      border-radius: var(--radius-m);
+      font-size: 15px;
+      font-family: var(--font-main);
+      background: #f8f9fa;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      box-sizing: border-box;
+    }
+
+    #auth-modal input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(11, 87, 208, 0.12);
+      background: #fff;
+    }
+
+    #auth-modal .auth-btn {
+      width: 100%;
+      padding: 13px;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 999px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 20px;
+      transition: background 0.2s, transform 0.15s;
+    }
+
+    #auth-modal .auth-btn:hover {
+      background: var(--primary-hover);
+    }
+
+    #auth-modal .auth-btn:active {
+      transform: scale(0.98);
+    }
+
+    #auth-modal .auth-switch {
+      text-align: center;
+      margin-top: 16px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    #auth-modal .auth-switch a {
+      color: var(--primary);
+      cursor: pointer;
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    #auth-modal .auth-switch a:hover {
+      text-decoration: underline;
+    }
+
+    #auth-modal .auth-error {
+      background: #fef2f2;
+      color: #b91c1c;
+      border: 1px solid #fecaca;
+      border-radius: var(--radius-s);
+      padding: 10px 14px;
+      margin-top: 12px;
+      font-size: 13px;
+      display: none;
+    }
+
+
+    /* ── User Panel (sidebar) ─────────────────────── */
+    .user-panel {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: linear-gradient(135deg, #e8f0fe, #f0f4f9);
+      border-radius: var(--radius-l);
+      margin-bottom: 4px;
+    }
+
+    .user-avatar {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      background: var(--primary);
+      color: #fff;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+
+    .user-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .user-info .user-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .user-info .user-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .user-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .user-actions button {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      transition: all 0.2s;
+    }
+
+    .user-actions button:hover {
+      background: rgba(0, 0, 0, 0.06);
+      color: var(--text-primary);
+    }
+
+    .guest-panel {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: #fffbe6;
+      border: 1px solid #fde68a;
+      border-radius: var(--radius-m);
+      margin-bottom: 4px;
+      font-size: 12px;
+      color: #92400e;
+    }
+
+    .guest-panel a {
+      color: var(--primary);
+      cursor: pointer;
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    /* ── Account Modal ────────────────────────────── */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.4);
+      z-index: 10000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.3s;
+    }
+
+    .modal-overlay.hidden {
+      display: none;
+    }
+
+    .modal-box {
+      background: #fff;
+      border-radius: 20px;
+      padding: 32px;
+      width: 440px;
+      max-width: 92vw;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+      animation: authSlideUp 0.35s ease;
+    }
+
+    .modal-box h2 {
+      font-size: 20px;
+      font-weight: 700;
+      margin: 0 0 20px;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    .modal-box .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border-subtle);
+      font-size: 14px;
+    }
+
+    .modal-box .stat-row:last-child {
+      border-bottom: none;
+    }
+
+    .modal-box .stat-label {
+      color: var(--text-muted);
+    }
+
+    .modal-box .stat-value {
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .modal-box .source-list {
+      list-style: none;
+      padding: 0;
+      margin: 12px 0 0;
+    }
+
+    .modal-box .source-list li {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 12px;
+      background: #f8f9fa;
+      border-radius: 8px;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+
+    .modal-box .source-list li .del-src-btn {
+      background: transparent;
+      border: 1px solid #fecaca;
+      color: #b91c1c;
+      border-radius: 6px;
+      padding: 3px 10px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+
+    .modal-box .source-list li .del-src-btn:hover {
+      background: #fef2f2;
+    }
+
+    .modal-box .modal-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .modal-box .modal-actions button {
+      flex: 1;
+      padding: 12px;
+      border-radius: 999px;
+      border: none;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+
+    .modal-box .btn-danger {
+      background: #fef2f2;
+      color: #b91c1c;
+      border: 1px solid #fecaca !important;
+    }
+
+    .modal-box .btn-danger:hover {
+      background: #fee2e2;
+    }
+
+    .modal-box .btn-close-modal {
+      background: #f1f3f4;
+      color: var(--text-secondary);
+    }
+
+    .modal-box .btn-close-modal:hover {
+      background: #e5e7eb;
+    }
+
+    .persist-badge {
+      display: inline-block;
+      background: #dcfce7;
+      color: #15803d;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      margin-left: 6px;
+      letter-spacing: 0.3px;
+      vertical-align: middle;
+    }
+  </style>
+</head>
+
+<body>
+  <!-- Auth Modal -->
+  <div id="auth-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h2 class="auth-form-title" id="auth-title">登录</h2>
+      <div class="auth-form-sub" id="auth-subtitle">登录后数据将持久保存，时间线更有意义</div>
+      <div id="auth-error" class="auth-error"></div>
+      <form id="auth-form" autocomplete="off">
+        <label for="auth-username">用户名</label>
+        <input type="text" id="auth-username" placeholder="输入用户名" required />
+        <label for="auth-password">密码</label>
+        <input type="password" id="auth-password" placeholder="输入密码" required />
+        <div id="auth-displayname-row" style="display:none">
+          <label for="auth-displayname">显示名称 <span style="color:var(--text-muted)">(可选)</span></label>
+          <input type="text" id="auth-displayname" placeholder="你的名称" />
         </div>
-      </main>
+        <button type="submit" class="auth-btn" id="auth-submit-btn">登录</button>
+      </form>
+      <div class="auth-switch" id="auth-switch">
+        还没有账户？<a id="auth-toggle-link">注册</a>
+      </div>
+      <div class="modal-actions" style="margin-top:16px">
+        <button class="btn-close-modal" id="auth-close-btn">关闭</button>
+      </div>
     </div>
+  </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
-    <script>
-      const history = [];
-      const pageSessionId = (window.crypto && window.crypto.randomUUID)
-        ? window.crypto.randomUUID()
-        : `sess-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      const markdownParser = window.markdownit ? window.markdownit({ html: false, linkify: true, breaks: true }) : null;
+  <!-- Account Modal -->
+  <div id="account-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h2>账户管理</h2>
+      <div id="account-stats"></div>
+      <div id="account-sources"></div>
+      <div class="modal-actions">
+        <button class="btn-danger" id="delete-all-data-btn">清除所有数据</button>
+        <button class="btn-danger" id="delete-account-btn">注销账户</button>
+        <button class="btn-close-modal" id="close-account-modal">关闭</button>
+      </div>
+    </div>
+  </div>
 
-      const chatBox = document.getElementById("chat-box");
-      const filesList = document.getElementById("files-list");
-      const timelineList = document.getElementById("timeline-list");
-      const ttlProofList = document.getElementById("ttl-proof-list");
-      const importList = document.getElementById("internal-import-list");
+  <div class="layout">
+    <aside class="rail">
+      <!-- User/Guest Panel -->
+      <div id="user-panel-container"></div>
 
-      const uploadBtn = document.getElementById("upload-btn");
-      const sendBtn = document.getElementById("send-btn");
-      const importBtn = document.getElementById("import-guidelines-btn");
-      const expireNowBtn = document.getElementById("expire-now-btn");
-      const ttlBanner = document.getElementById("ttl-banner");
-      const ttlBannerText = document.getElementById("ttl-banner-text");
-      const sessionIdText = document.getElementById("session-id-text");
+      <div class="card">
+        <h2>病例上传 <span id="persist-badge" class="persist-badge" style="display:none">已持久化</span></h2>
+        <div class="muted">支持 PDF/图片/txt。当前页面会话隔离，刷新后自动失效。</div>
+        <input id="file-input" type="file" multiple style="margin-top:8px" />
+        <button id="upload-btn" class="btn" style="width:100%;margin-top:8px">上传并入库</button>
+        <div id="upload-progress" class="upload-progress">
+          <div class="progress-header">
+            <span id="progress-label" class="progress-label">准备中...</span>
+            <span id="progress-timer" class="progress-timer">00:00</span>
+          </div>
+          <div class="progress-bar-track">
+            <div id="progress-bar-fill" class="progress-bar-fill"></div>
+          </div>
+          <div id="progress-steps" class="progress-steps"></div>
+          <div id="progress-file-status" class="progress-file-status"></div>
+        </div>
+        <ul id="files-list" class="stack"></ul>
+      </div>
 
-      let manualClearOnly = true;
-      let ttlRemainingSeconds = null;
-      let ttlExpiredShown = false;
+      <div class="card">
+        <h2>病程时间线 <span id="risk-pill" class="risk-pill risk-low">LOW</span></h2>
+        <div class="kpis">
+          <div class="kpi">
+            <div class="label">Risk Score</div>
+            <div id="kpi-risk-score" class="value">0.00</div>
+          </div>
+          <div class="kpi">
+            <div class="label">Event Count</div>
+            <div id="kpi-events" class="value">0</div>
+          </div>
+          <div class="kpi">
+            <div class="label">High Risk</div>
+            <div id="kpi-high-risk" class="value">0</div>
+          </div>
+        </div>
+        <ul id="timeline-list" class="stack"></ul>
+      </div>
 
-      function renderMarkdown(text) {
-        if (!markdownParser) {
-          return String(text || "")
-            .replaceAll("&", "&amp;")
-            .replaceAll("<", "&lt;")
-            .replaceAll(">", "&gt;")
-            .replaceAll("\n", "<br/>");
-        }
-        const raw = markdownParser.render(text || "");
-        return window.DOMPurify ? window.DOMPurify.sanitize(raw) : raw;
+      <div class="card">
+        <h2>数据生命周期</h2>
+        <div id="ttl-banner" class="ttl-banner">
+          <span id="ttl-banner-text">当前为手动清除模式：数据不会自动过期</span>
+          <button id="expire-now-btn" class="mini-btn">手动清除会话数据</button>
+        </div>
+        <div class="muted" id="session-id-text">会话ID：-</div>
+        <div class="steps">
+          <div id="step-upload" class="step">1) 上传接收</div>
+          <div id="step-redact" class="step">2) 隐私脱敏</div>
+          <div id="step-session" class="step">3) 会话临时库</div>
+          <div id="step-ttl" class="step">4) TTL 销毁证明</div>
+        </div>
+        <ul id="ttl-proof-list" class="stack"></ul>
+      </div>
+
+      <details class="card slim">
+        <summary>内部维护（可选）</summary>
+        <div class="muted" style="margin-top:8px">导入 `data/guidelines` 到内部持久化知识库。</div>
+        <input id="internal-token" type="password" placeholder="内部令牌（可选）" style="margin-top:8px" />
+        <label class="muted" style="display:block;margin-top:8px">
+          <input id="internal-reset" type="checkbox" checked /> 重建内部库（reset=true）
+        </label>
+        <button id="import-guidelines-btn" class="btn btn-secondary" style="width:100%;margin-top:8px">导入内部指南</button>
+        <ul id="internal-import-list" class="stack"></ul>
+      </details>
+    </aside>
+
+    <main class="center">
+      <div class="card" style="padding-bottom:10px">
+        <h2>医学问答区 <span class="badge">RAG + Timeline Routing</span></h2>
+        <div id="thinking-indicator" class="thinking-indicator">
+          <span class="thinking-left">深度思考 &gt; <span
+              class="thinking-dots-inline"><span></span><span></span><span></span></span></span>
+          <span class="thinking-right">生成中</span>
+        </div>
+        <div id="chat-box"></div>
+        <div class="composer" style="margin-top:10px">
+          <input id="message" placeholder="输入问题，例如：目前风险和可选治疗路径如何？还缺哪些关键报告？" />
+          <button id="send-btn">发送</button>
+        </div>
+        <div class="muted" style="margin-top:8px">每条助手回复尾部可悬停查看本轮证据与校验。</div>
+      </div>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+  <script>
+    const pageSessionId = (window.crypto && window.crypto.randomUUID)
+      ? window.crypto.randomUUID()
+      : `sess-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    // ── Auth State ──
+    let authToken = localStorage.getItem('auth_token') || null;
+    let currentUser = null;
+    let isGuest = false;
+
+    function authHeaders() {
+      const h = { 'X-Session-ID': pageSessionId };
+      if (authToken) h['Authorization'] = `Bearer ${authToken}`;
+      return h;
+    }
+
+    // ── Auth UI ──
+    const authModal = document.getElementById('auth-modal');
+    const authForm = document.getElementById('auth-form');
+    const authTitle = document.getElementById('auth-title');
+    const authSubtitle = document.getElementById('auth-subtitle');
+    const authError = document.getElementById('auth-error');
+    const authSubmitBtn = document.getElementById('auth-submit-btn');
+    const authToggleLink = document.getElementById('auth-toggle-link');
+
+    const authDisplayNameRow = document.getElementById('auth-displayname-row');
+    let authMode = 'login'; // 'login' | 'register'
+
+    function setAuthMode(mode) {
+      authMode = mode;
+      if (mode === 'register') {
+        authTitle.textContent = '\u6ce8\u518c';
+        authSubtitle.textContent = '\u521b\u5efa\u8d26\u6237\u540e\u53ef\u6301\u4e45\u4fdd\u5b58\u6570\u636e\uff0c\u9686\u7ebf\u66f4\u6709\u610f\u4e49';
+        authSubmitBtn.textContent = '\u6ce8\u518c';
+        document.getElementById('auth-switch').innerHTML = '\u5df2\u6709\u8d26\u6237\uff1f<a id="auth-toggle-link">\u767b\u5f55</a>';
+        authDisplayNameRow.style.display = 'block';
+      } else {
+        authTitle.textContent = '\u767b\u5f55';
+        authSubtitle.textContent = '\u767b\u5f55\u540e\u6570\u636e\u5c06\u6301\u4e45\u4fdd\u5b58\uff0c\u65f6\u95f4\u7ebf\u66f4\u6709\u610f\u4e49';
+        authSubmitBtn.textContent = '\u767b\u5f55';
+        document.getElementById('auth-switch').innerHTML = '\u8fd8\u6ca1\u6709\u8d26\u6237\uff1f<a id="auth-toggle-link">\u6ce8\u518c</a>';
+        authDisplayNameRow.style.display = 'none';
       }
+      document.getElementById('auth-toggle-link').onclick = () => setAuthMode(mode === 'login' ? 'register' : 'login');
+      authError.style.display = 'none';
+    }
+    authToggleLink.onclick = () => setAuthMode('register');
 
-      function renderMessage(role, text) {
-        const div = document.createElement("div");
-        div.className = `msg ${role}`;
-        if (role === "assistant") div.innerHTML = renderMarkdown(text);
-        else div.textContent = text;
-        chatBox.appendChild(div);
-        chatBox.scrollTop = chatBox.scrollHeight;
-        return div;
-      }
-
-      function setLifecycleState({ uploaded = false, redacted = false, inSession = false, ttl = false }) {
-        document.getElementById("step-upload").className = `step ${uploaded ? "on" : ""}`.trim();
-        document.getElementById("step-redact").className = `step ${redacted ? "done" : ""}`.trim();
-        document.getElementById("step-session").className = `step ${inSession ? "on" : ""}`.trim();
-        document.getElementById("step-ttl").className = `step ${ttl ? "done" : ""}`.trim();
-      }
-
-      function formatDuration(seconds) {
-        const s = Math.max(0, Number(seconds || 0));
-        const m = Math.floor(s / 60);
-        const sec = s % 60;
-        return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-      }
-
-      function updateTTLBanner() {
-        sessionIdText.textContent = `会话ID：${pageSessionId}`;
-        if (manualClearOnly) {
-          ttlBanner.classList.remove("expired");
-          ttlBannerText.textContent = "当前为手动清除模式：数据不会自动过期";
-          return;
-        }
-        if (ttlRemainingSeconds === null) {
-          ttlBanner.classList.remove("expired");
-          ttlBannerText.textContent = "会话有效期倒计时：--:--";
-          return;
-        }
-        if (ttlRemainingSeconds <= 0) {
-          ttlBanner.classList.add("expired");
-          ttlBannerText.textContent = "会话已销毁：病例临时库已清空（可查看TTL证明）";
-          if (!ttlExpiredShown) {
-            renderMessage("assistant", "会话临时病例已按 TTL 自动销毁。你可以在左侧“TTL 销毁证明”查看回执。");
-            ttlExpiredShown = true;
-          }
-          return;
-        }
-        ttlBanner.classList.remove("expired");
-        ttlBannerText.textContent = `会话有效期倒计时：${formatDuration(ttlRemainingSeconds)}`;
-      }
-
-      function applyRiskPill(level) {
-        const pill = document.getElementById("risk-pill");
-        const normalized = String(level || "low").toLowerCase();
-        pill.textContent = normalized.toUpperCase();
-        pill.className = "risk-pill " + (normalized === "high" ? "risk-high" : normalized === "moderate" ? "risk-moderate" : "risk-low");
-      }
-
-      function renderTimelinePanel(state, events) {
-        document.getElementById("kpi-risk-score").textContent = Number(state?.risk_score || 0).toFixed(2);
-        document.getElementById("kpi-events").textContent = String(Math.trunc(Number(state?.event_count || 0)));
-        document.getElementById("kpi-high-risk").textContent = String(Math.trunc(Number(state?.high_risk_events || 0)));
-        applyRiskPill(state?.risk_level || "low");
-
-        timelineList.innerHTML = "";
-        if (!events?.length) {
-          const li = document.createElement("li");
-          li.textContent = "暂无结构化病程事件";
-          timelineList.appendChild(li);
-          return;
-        }
-
-        events.slice(-10).reverse().forEach((ev) => {
-          const li = document.createElement("li");
-          li.className = "timeline-item";
-          li.textContent = `${ev.date} | ${ev.event_type} | ${ev.metric}=${ev.value} ${ev.unit} | risk=${ev.risk_tag}`;
-          timelineList.appendChild(li);
+    authForm.onsubmit = async (e) => {
+      e.preventDefault();
+      const username = document.getElementById('auth-username').value.trim();
+      const password = document.getElementById('auth-password').value;
+      const displayName = document.getElementById('auth-displayname').value.trim();
+      authError.style.display = 'none';
+      authSubmitBtn.disabled = true;
+      authSubmitBtn.textContent = '\u8bf7\u7a0d\u5019...';
+      try {
+        const url = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
+        const body = authMode === 'register'
+          ? { username, password, display_name: displayName || username }
+          : { username, password };
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
         });
-      }
-
-      function attachRoundEvidence(div, sources, report, warning, keyConclusions, externalSources, literatureGuard) {
-        const sourceList = Array.isArray(sources) ? sources : [];
-        const conclusions = Array.isArray(keyConclusions) ? keyConclusions : [];
-        const external = Array.isArray(externalSources) ? externalSources : [];
-        const litCoverage = literatureGuard?.coverage ?? "n/a";
-        const verified = Number(report?.verified_claims || 0);
-        const unsupported = Number(report?.unsupported_claims || 0);
-        const coverage = report?.coverage ?? "n/a";
-        const summaryText = `关键结论${conclusions.length}条 · 证据${sourceList.length}条 · 文献${external.length}条 · 证据契合=${coverage} · 文献契合=${litCoverage}`;
-
-        const wrapper = document.createElement("div");
-        wrapper.className = "round-meta";
-
-        const summary = document.createElement("div");
-        summary.className = "round-meta-summary";
-        summary.textContent = summaryText;
-        wrapper.appendChild(summary);
-
-        const panel = document.createElement("div");
-        panel.className = "round-meta-panel";
-        const grid = document.createElement("div");
-        grid.className = "round-meta-grid";
-
-        const left = document.createElement("div");
-        const leftTitle = document.createElement("div");
-        leftTitle.className = "muted";
-        leftTitle.textContent = "关键结论（证据状态）";
-        left.appendChild(leftTitle);
-        const conclusionWrap = document.createElement("div");
-        if (!conclusions.length) {
-          const empty = document.createElement("div");
-          empty.className = "muted";
-          empty.textContent = "未提炼出高价值结论（请补充问题或病例信息）";
-          conclusionWrap.appendChild(empty);
+        const data = await resp.json();
+        if (data.ok) {
+          authToken = data.token;
+          currentUser = data.user;
+          localStorage.setItem('auth_token', authToken);
+          isGuest = false;
+          authModal.classList.add('hidden');
+          onAuthReady();
         } else {
-          const suffLabel = (suff) => {
-            const normalized = String(suff || "low").toLowerCase();
-            if (normalized === "high") return "充分";
-            if (normalized === "medium") return "基本充分";
-            return "待核实";
-          };
-          conclusions.forEach((c) => {
-            const card = document.createElement("div");
-            card.className = "conclusion-card";
-            const suff = String(c.sufficiency || "low");
-            const suffClass = suff === "high" ? "suff-high" : (suff === "medium" ? "suff-medium" : "suff-low");
-            const cited = (c.cited_ranks || []).join(",");
-            const score = Number(c.support_score || 0).toFixed(2);
-            const reason = c.reason || "暂无";
-            card.innerHTML = `<div>${c.claim || ""}</div><div class="${suffClass}">证据状态: ${suffLabel(suff)} · 证据#${cited}</div>`;
-            const details = document.createElement("details");
-            details.className = "slim conclusion-detail";
-            const summary = document.createElement("summary");
-            summary.textContent = "证据详情";
-            const detailBody = document.createElement("div");
-            detailBody.className = "muted";
-            detailBody.textContent = `匹配分数=${score}；原因=${reason}`;
-            details.appendChild(summary);
-            details.appendChild(detailBody);
-            card.appendChild(details);
-            conclusionWrap.appendChild(card);
-          });
+          authError.textContent = data.error || '\u64cd\u4f5c\u5931\u8d25';
+          authError.style.display = 'block';
         }
-        left.appendChild(conclusionWrap);
+      } catch (err) {
+        authError.textContent = '\u7f51\u7edc\u9519\u8bef\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5';
+        authError.style.display = 'block';
+      }
+      authSubmitBtn.disabled = false;
+      authSubmitBtn.textContent = authMode === 'register' ? '\u6ce8\u518c' : '\u767b\u5f55';
+    };
 
-        const right = document.createElement("div");
-        const rightTitle = document.createElement("div");
-        rightTitle.className = "muted";
-        rightTitle.textContent = "引用片段（页码）";
-        right.appendChild(rightTitle);
-        const rightUl = document.createElement("ul");
-        rightUl.className = "mini-list";
-        if (!sourceList.length) {
-          const li = document.createElement("li");
-          li.textContent = "无引用";
-          rightUl.appendChild(li);
+    // Close auth modal button
+    document.getElementById('auth-close-btn').onclick = () => {
+      authModal.classList.add('hidden');
+    };
+    // Click outside modal-box to close
+    authModal.addEventListener('click', (e) => {
+      if (e.target === authModal) {
+        authModal.classList.add('hidden');
+      }
+    });
+
+    async function tryAutoLogin() {
+      if (!authToken) {
+        isGuest = true;
+        onAuthReady();
+        return;
+      }
+      try {
+        const resp = await fetch('/api/auth/me', {
+          headers: { 'Authorization': `Bearer ${authToken}` },
+        });
+        const data = await resp.json();
+        if (data.ok) {
+          currentUser = data.user;
+          isGuest = false;
+          onAuthReady();
         } else {
-          sourceList.slice(0, 6).forEach((s) => {
-            const li = document.createElement("li");
-            li.className = "source-row";
-            const score = typeof s.score === "number" ? s.score.toFixed(4) : "n/a";
-            const page = Number.isFinite(Number(s.page)) ? `P${Number(s.page)}` : "P?";
-            li.textContent = `#${s.rank || "-"} ${page} score=${score} ${s.source || ""}`;
-            li.title = s.evidence || s.preview || "";
-            rightUl.appendChild(li);
-          });
+          authToken = null;
+          localStorage.removeItem('auth_token');
+          isGuest = true;
+          onAuthReady();
         }
-        if (warning) {
-          const warn = document.createElement("li");
-          warn.style.color = "#b45309";
-          warn.textContent = warning;
-          rightUl.appendChild(warn);
-        }
-        right.appendChild(rightUl);
-
-        grid.appendChild(left);
-        grid.appendChild(right);
-        if (external.length) {
-          const ext = document.createElement("div");
-          const extTitle = document.createElement("div");
-          extTitle.className = "muted";
-          extTitle.textContent = external.length < 5
-            ? `外部学术文献（仅检索到 ${external.length}/5 条）`
-            : "外部学术文献（5条）";
-          ext.appendChild(extTitle);
-          const extUl = document.createElement("ul");
-          extUl.className = "mini-list";
-          external.slice(0, 5).forEach((r, idx) => {
-            const li = document.createElement("li");
-            const a = document.createElement("a");
-            a.className = "ext-link";
-            const ptype = r.paper_type || "other";
-            a.textContent = `[文献#${idx + 1}] ${r.title || "untitled"} | ${ptype} | ${r.year || "n/a"} | ${r.source || "web"}`;
-            a.href = r.url || "#";
-            a.target = "_blank";
-            a.rel = "noopener noreferrer";
-            li.appendChild(a);
-            if (r.venue || r.doi) {
-              const meta = document.createElement("div");
-              meta.className = "muted";
-              meta.textContent = `venue=${r.venue || "n/a"} | doi=${r.doi || "n/a"}`;
-              li.appendChild(meta);
-            }
-            extUl.appendChild(li);
-          });
-          ext.appendChild(extUl);
-          grid.appendChild(ext);
-        }
-        panel.appendChild(grid);
-        wrapper.appendChild(panel);
-        div.appendChild(wrapper);
+      } catch {
+        // On error, fallback to guest but keep token (maybe network issue) 
+        // or just treat as guest for this session without clearing token?
+        // Let's clear to be safe and avoid broken state, or just render guest.
+        // For simplicity:
+        isGuest = true;
+        onAuthReady();
       }
+    }
 
-      function sumRedaction(item) {
-        const redaction = item.redaction || {};
-        return Object.values(redaction).reduce((acc, n) => acc + Number(n || 0), 0);
+    function renderUserPanel() {
+      const container = document.getElementById('user-panel-container');
+      if (currentUser) {
+        const initial = (currentUser.display_name || currentUser.username || '?')[0].toUpperCase();
+        container.innerHTML = `
+          <div class="user-panel">
+            <div class="user-avatar">${initial}</div>
+            <div class="user-info">
+              <div class="user-name">${currentUser.display_name || currentUser.username}</div>
+              <div class="user-meta">\u6570\u636e\u5df2\u6301\u4e45\u5316\u4fdd\u5b58</div>
+            </div>
+            <div class="user-actions">
+              <button id="open-account-btn" title="\u8d26\u6237\u7ba1\u7406">\u2699</button>
+              <button id="logout-btn" title="\u9000\u51fa\u767b\u5f55">\u2190</button>
+            </div>
+          </div>`;
+        document.getElementById('open-account-btn').onclick = openAccountModal;
+        document.getElementById('logout-btn').onclick = doLogout;
+        document.getElementById('persist-badge').style.display = 'inline-block';
+      } else {
+        container.innerHTML = `
+          <div class="guest-panel">
+            \u26a0 \u8bbf\u5ba2\u6a21\u5f0f\uff1a\u6570\u636e\u4e0d\u6301\u4e45\u5316\uff0c\u5237\u65b0\u540e\u4e22\u5931\u3002
+            <a id="guest-login-link">\u767b\u5f55/\u6ce8\u518c</a>
+          </div>`;
+        document.getElementById('guest-login-link').onclick = () => {
+          authModal.classList.remove('hidden');
+          setAuthMode('login');
+        };
+        document.getElementById('persist-badge').style.display = 'none';
       }
+    }
 
-      async function refreshTimeline() {
-        try {
-          const res = await fetch("/api/session/timeline", { headers: { "X-Session-ID": pageSessionId } });
-          const data = await res.json();
-          renderTimelinePanel(data.state || {}, data.events || []);
-          manualClearOnly = Boolean(data.manual_clear_only ?? true);
-          ttlRemainingSeconds = data.expires_in_seconds == null ? null : Number(data.expires_in_seconds);
-          ttlExpiredShown = ttlRemainingSeconds !== null && ttlRemainingSeconds <= 0 ? ttlExpiredShown : false;
-          updateTTLBanner();
-          setLifecycleState({ uploaded: true, redacted: true, inSession: Number(data.event_count || 0) > 0, ttl: false });
-        } catch (_) {}
-      }
+    async function doLogout() {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: authHeaders(),
+        });
+      } catch { }
+      authToken = null;
+      currentUser = null;
+      localStorage.removeItem('auth_token');
+      isGuest = true;
+      renderUserPanel();
+    }
 
-      async function refreshTTLProof() {
-        try {
-          const url = `/api/audit/ttl-proof?session_id=${encodeURIComponent(pageSessionId)}`;
-          const res = await fetch(url);
-          const data = await res.json();
-          const items = data.items || [];
-          ttlProofList.innerHTML = "";
-          if (!items.length) {
-            const li = document.createElement("li");
-            li.textContent = "当前会话暂无销毁证明";
-            ttlProofList.appendChild(li);
-            return;
+    async function openAccountModal() {
+      const modal = document.getElementById('account-modal');
+      modal.classList.remove('hidden');
+      try {
+        const resp = await fetch('/api/auth/me', { headers: authHeaders() });
+        const data = await resp.json();
+        if (!data.ok) return;
+        const stats = data.data_stats || {};
+        const user = data.user || {};
+        const created = new Date(user.created_at * 1000).toLocaleDateString('zh-CN');
+        document.getElementById('account-stats').innerHTML = `
+          <div class="stat-row"><span class="stat-label">\u7528\u6237\u540d</span><span class="stat-value">${user.username}</span></div>
+          <div class="stat-row"><span class="stat-label">\u663e\u793a\u540d\u79f0</span><span class="stat-value">${user.display_name || '-'}</span></div>
+          <div class="stat-row"><span class="stat-label">\u6ce8\u518c\u65f6\u95f4</span><span class="stat-value">${created}</span></div>
+          <div class="stat-row"><span class="stat-label">\u65f6\u95f4\u7ebf\u4e8b\u4ef6</span><span class="stat-value">${stats.timeline_events || 0}</span></div>
+          <div class="stat-row"><span class="stat-label">\u5411\u91cf\u5757\u6570</span><span class="stat-value">${stats.vector_chunks || 0}</span></div>
+        `;
+        const sources = stats.upload_sources || [];
+        if (sources.length > 0) {
+          let html = '<h3 style="font-size:14px;margin:16px 0 8px;font-weight:600">\u5df2\u4e0a\u4f20\u6587\u4ef6</h3><ul class="source-list">';
+          for (const src of sources) {
+            html += `<li><span>${src}</span><button class="del-src-btn" data-source="${src}">\u5220\u9664</button></li>`;
           }
-          ttlRemainingSeconds = 0;
-          updateTTLBanner();
-          setLifecycleState({ uploaded: true, redacted: true, inSession: false, ttl: true });
-          items.slice(-5).reverse().forEach((item) => {
-            const li = document.createElement("li");
-            const ts = new Date((Number(item.timestamp) || 0) * 1000).toLocaleString();
-            li.innerHTML = `<span class="proof-ok">TTL-PROOF</span> ${ts}<br/>${item.details?.proof || "session_expired"}`;
-            ttlProofList.appendChild(li);
+          html += '</ul>';
+          document.getElementById('account-sources').innerHTML = html;
+          document.querySelectorAll('.del-src-btn').forEach(btn => {
+            btn.onclick = async () => {
+              if (!confirm('\u786e\u5b9a\u5220\u9664\u8be5\u6587\u4ef6\u7684\u6240\u6709\u6570\u636e\uff1f')) return;
+              btn.disabled = true;
+              btn.textContent = '...';
+              try {
+                await fetch(`/api/user/delete-upload?source=${encodeURIComponent(btn.dataset.source)}`, {
+                  method: 'POST', headers: authHeaders(),
+                });
+                openAccountModal(); // refresh
+                refreshTimeline();
+              } catch { }
+            };
           });
-        } catch (_) {}
-      }
-
-      async function expireNow() {
-        expireNowBtn.disabled = true;
-        try {
-          await fetch("/api/session/expire-now", {
-            method: "POST",
-            headers: { "X-Session-ID": pageSessionId },
-          });
-          ttlRemainingSeconds = 0;
-          updateTTLBanner();
-          await refreshTimeline();
-          await refreshTTLProof();
-        } catch (_) {
-          // Ignore and recover by polling.
-        } finally {
-          expireNowBtn.disabled = false;
+        } else {
+          document.getElementById('account-sources').innerHTML = '<div class="muted" style="margin-top:12px">\u6682\u65e0\u5df2\u4e0a\u4f20\u6587\u4ef6</div>';
         }
-      }
+      } catch { }
+    }
 
-      async function uploadFiles() {
-        const input = document.getElementById("file-input");
-        if (!input.files.length) return;
-        uploadBtn.disabled = true;
-        uploadBtn.textContent = "OCR处理中...";
-        const form = new FormData();
-        Array.from(input.files).forEach((f) => form.append("files", f));
+    document.getElementById('close-account-modal').onclick = () => {
+      document.getElementById('account-modal').classList.add('hidden');
+    };
 
-        try {
-          const res = await fetch("/api/upload", {
-            method: "POST",
-            headers: { "X-Session-ID": pageSessionId },
-            body: form,
-          });
-          const data = await res.json();
-          filesList.innerHTML = "";
-          (data.results || []).forEach((item) => {
-            const li = document.createElement("li");
-            if (item.ok) {
-              li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0}`;
-            } else {
-              li.textContent = `${item.file} | 上传失败: ${item.error || "未知错误"}`;
-            }
-            filesList.appendChild(li);
-          });
+    document.getElementById('delete-all-data-btn').onclick = async () => {
+      if (!confirm('\u786e\u5b9a\u6e05\u9664\u6240\u6709\u4e0a\u4f20\u6570\u636e\uff1f\u6b64\u64cd\u4f5c\u4e0d\u53ef\u64a4\u9500\u3002')) return;
+      try {
+        await fetch('/api/user/delete-data', {
+          method: 'POST', headers: authHeaders(),
+        });
+        document.getElementById('account-modal').classList.add('hidden');
+        refreshTimeline();
+        alert('\u6240\u6709\u6570\u636e\u5df2\u6e05\u9664');
+      } catch { }
+    };
 
-          setLifecycleState({ uploaded: true, redacted: true, inSession: true, ttl: false });
-          await refreshTimeline();
-          await refreshTTLProof();
-        } catch (err) {
-          filesList.innerHTML = "";
-          const li = document.createElement("li");
-          li.textContent = `上传失败: ${err?.message || "网络错误"}`;
-          filesList.appendChild(li);
-        } finally {
-          uploadBtn.disabled = false;
-          uploadBtn.textContent = "上传并入库";
+    document.getElementById('delete-account-btn').onclick = async () => {
+      if (!confirm('\u8b66\u544a\uff1a\u786e\u5b9a\u6ce8\u9500\u8d26\u6237\uff1f\n\u8fd9\u5c06\u6c38\u4e45\u5220\u9664\u8d26\u6237\u53ca\u5176\u6240\u6709\u6570\u636e\uff0c\u65e0\u6cd5\u6062\u590d\u3002')) return;
+      try {
+        const resp = await fetch('/api/user/delete-account', {
+          method: 'POST', headers: authHeaders(),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+          alert('\u8d26\u6237\u5df2\u6ce8\u9500');
+          doLogout();
+        } else {
+          alert('\u6ce8\u9500\u5931\u8d25: ' + (data.error || '\u672a\u77e5\u9519\u8bef'));
         }
+      } catch {
+        alert('\u7f51\u7edc\u9519\u8bef');
       }
+    };
 
-      async function sendMessage() {
-        const input = document.getElementById("message");
-        const text = input.value.trim();
-        if (!text) return;
-        sendBtn.disabled = true;
-        renderMessage("user", text);
-        input.value = "";
-
-        try {
-          const res = await fetch("/api/chat", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Session-ID": pageSessionId,
-            },
-            body: JSON.stringify({ message: text, history }),
-          });
-          const data = await res.json();
-          const assistantDiv = renderMessage("assistant", data.answer || "出错了，请稍后重试。");
-          history.push({ role: "user", content: text });
-          history.push({ role: "assistant", content: data.answer || "" });
-          attachRoundEvidence(
-            assistantDiv,
-            data.sources || [],
-            data.evidence_guard || null,
-            data.citation_warning || "",
-            data.key_conclusions || [],
-            data.external_sources || [],
-            data.literature_guard || null,
-          );
-          await refreshTimeline();
-          await refreshTTLProof();
-        } catch (err) {
-          renderMessage("assistant", `出错了：${err?.message || "网络错误"}`);
-        } finally {
-          sendBtn.disabled = false;
-        }
-      }
-
-      async function importGuidelines() {
-        const tokenInput = document.getElementById("internal-token");
-        const reset = document.getElementById("internal-reset").checked;
-        const headers = { "Content-Type": "application/json" };
-        if (tokenInput.value.trim()) headers["X-Internal-Token"] = tokenInput.value.trim();
-
-        importBtn.disabled = true;
-        importBtn.textContent = "导入中...";
-        importList.innerHTML = "";
-
-        try {
-          const res = await fetch("/api/internal/import-guidelines", {
-            method: "POST",
-            headers,
-            body: JSON.stringify({ reset }),
-          });
-          const data = await res.json();
-          (data.results || []).forEach((item) => {
-            const li = document.createElement("li");
-            li.textContent = item.ok ? `${item.file} | chunks=${item.chunks}` : `${item.file} | 失败: ${item.error || "未知错误"}`;
-            importList.appendChild(li);
-          });
-          const sum = document.createElement("li");
-          sum.textContent = `完成: internal_chunks=${data.internal_chunks ?? 0}`;
-          importList.appendChild(sum);
-        } catch (err) {
-          const li = document.createElement("li");
-          li.textContent = `导入失败: ${err?.message || "网络错误"}`;
-          importList.appendChild(li);
-        } finally {
-          importBtn.disabled = false;
-          importBtn.textContent = "导入内部指南";
-        }
-      }
-
-      document.getElementById("upload-btn").addEventListener("click", uploadFiles);
-      document.getElementById("send-btn").addEventListener("click", sendMessage);
-      document.getElementById("import-guidelines-btn").addEventListener("click", importGuidelines);
-      document.getElementById("expire-now-btn").addEventListener("click", expireNow);
-      document.getElementById("message").addEventListener("keydown", (e) => {
-        if (e.key === "Enter") sendMessage();
-      });
-
-      renderMessage("assistant", "你好，我会优先参考内部医学指南，再结合你上传的病例进行带证据回答。\n\n请先上传病例文件，然后提问。")
+    function onAuthReady() {
+      renderUserPanel();
       refreshTimeline();
       refreshTTLProof();
-      setInterval(refreshTTLProof, 15000);
-    </script>
-  </body>
+    }
+
+    const history = [];
+
+    const markdownParser = window.markdownit ? window.markdownit({ html: false, linkify: true, breaks: true }) : null;
+
+    const chatBox = document.getElementById("chat-box");
+    const filesList = document.getElementById("files-list");
+    const timelineList = document.getElementById("timeline-list");
+    const ttlProofList = document.getElementById("ttl-proof-list");
+    const importList = document.getElementById("internal-import-list");
+    const fileInput = document.getElementById("file-input");
+    const thinkingIndicator = document.getElementById("thinking-indicator");
+
+    const uploadBtn = document.getElementById("upload-btn");
+    const sendBtn = document.getElementById("send-btn");
+    const importBtn = document.getElementById("import-guidelines-btn");
+    const expireNowBtn = document.getElementById("expire-now-btn");
+    const ttlBanner = document.getElementById("ttl-banner");
+    const ttlBannerText = document.getElementById("ttl-banner-text");
+    const sessionIdText = document.getElementById("session-id-text");
+
+    let manualClearOnly = true;
+    let ttlRemainingSeconds = null;
+    let ttlExpiredShown = false;
+    const selectedUploadFiles = new Map();
+
+    function fileKey(file) {
+      return [file.name || "", file.size || 0, file.lastModified || 0].join("|");
+    }
+
+    function renderPendingUploadFiles() {
+      filesList.innerHTML = "";
+      if (!selectedUploadFiles.size) {
+        const li = document.createElement("li");
+        li.textContent = "未选择文件";
+        filesList.appendChild(li);
+        return;
+      }
+      Array.from(selectedUploadFiles.values()).forEach((f) => {
+        const li = document.createElement("li");
+        const kb = Math.max(1, Math.round((Number(f.size || 0)) / 1024));
+        li.textContent = `${f.name} | ${kb}KB | 待上传`;
+        filesList.appendChild(li);
+      });
+    }
+
+    function renderMarkdown(text) {
+      if (!markdownParser) {
+        return String(text || "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll("\n", "<br/>");
+      }
+      const raw = markdownParser.render(text || "");
+      return window.DOMPurify ? window.DOMPurify.sanitize(raw) : raw;
+    }
+
+    function renderMessage(role, text) {
+      const div = document.createElement("div");
+      div.className = `msg ${role}`;
+      if (role === "assistant") div.innerHTML = renderMarkdown(text);
+      else div.textContent = text;
+      chatBox.appendChild(div);
+      chatBox.scrollTop = chatBox.scrollHeight;
+      return div;
+    }
+
+    function showAssistantLoading() {
+      chatBox.appendChild(thinkingIndicator);
+      thinkingIndicator.classList.add("on");
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    function hideAssistantLoading() {
+      thinkingIndicator.classList.remove("on");
+      if (thinkingIndicator.parentNode === chatBox) {
+        chatBox.removeChild(thinkingIndicator);
+      }
+    }
+
+    function setLifecycleState({ uploaded = false, redacted = false, inSession = false, ttl = false }) {
+      document.getElementById("step-upload").className = `step ${uploaded ? "on" : ""}`.trim();
+      document.getElementById("step-redact").className = `step ${redacted ? "done" : ""}`.trim();
+      document.getElementById("step-session").className = `step ${inSession ? "on" : ""}`.trim();
+      document.getElementById("step-ttl").className = `step ${ttl ? "done" : ""}`.trim();
+    }
+
+    function formatDuration(seconds) {
+      const s = Math.max(0, Number(seconds || 0));
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+    }
+
+    function updateTTLBanner() {
+      sessionIdText.textContent = `会话ID：${pageSessionId}`;
+      if (manualClearOnly) {
+        ttlBanner.classList.remove("expired");
+        ttlBannerText.textContent = "当前为手动清除模式：数据不会自动过期";
+        return;
+      }
+      if (ttlRemainingSeconds === null) {
+        ttlBanner.classList.remove("expired");
+        ttlBannerText.textContent = "会话有效期倒计时：--:--";
+        return;
+      }
+      if (ttlRemainingSeconds <= 0) {
+        ttlBanner.classList.add("expired");
+        ttlBannerText.textContent = "会话已销毁：病例临时库已清空（可查看TTL证明）";
+        if (!ttlExpiredShown) {
+          renderMessage("assistant", "会话临时病例已按 TTL 自动销毁。你可以在左侧“TTL 销毁证明”查看回执。");
+          ttlExpiredShown = true;
+        }
+        return;
+      }
+      ttlBanner.classList.remove("expired");
+      ttlBannerText.textContent = `会话有效期倒计时：${formatDuration(ttlRemainingSeconds)}`;
+    }
+
+    function applyRiskPill(level) {
+      const pill = document.getElementById("risk-pill");
+      const normalized = String(level || "low").toLowerCase();
+      pill.textContent = normalized.toUpperCase();
+      pill.className = "risk-pill " + (normalized === "high" ? "risk-high" : normalized === "moderate" ? "risk-moderate" : "risk-low");
+    }
+
+    function renderTimelinePanel(state, events) {
+      document.getElementById("kpi-risk-score").textContent = Number(state?.risk_score || 0).toFixed(2);
+      document.getElementById("kpi-events").textContent = String(Math.trunc(Number(state?.event_count || 0)));
+      document.getElementById("kpi-high-risk").textContent = String(Math.trunc(Number(state?.high_risk_events || 0)));
+      applyRiskPill(state?.risk_level || "low");
+
+      timelineList.innerHTML = "";
+      if (!events?.length) {
+        const li = document.createElement("li");
+        li.textContent = "暂无结构化病程事件";
+        timelineList.appendChild(li);
+        return;
+      }
+      const groups = new Map();
+      events.forEach((ev) => {
+        const date = String(ev.date || "未知日期");
+        if (!groups.has(date)) groups.set(date, []);
+        groups.get(date).push(ev);
+      });
+
+      const sortedDates = Array.from(groups.keys()).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+      sortedDates.forEach((date, idx) => {
+        const dayEvents = groups.get(date) || [];
+        const card = document.createElement("li");
+        card.className = "timeline-day";
+
+        const details = document.createElement("details");
+        details.open = idx < 2;
+
+        const summary = document.createElement("summary");
+        summary.className = "timeline-day-head";
+        const headLeft = document.createElement("span");
+        headLeft.textContent = date;
+        const headRight = document.createElement("span");
+        headRight.className = "timeline-day-meta";
+        headRight.textContent = `${dayEvents.length} 条事件`;
+        summary.appendChild(headLeft);
+        summary.appendChild(headRight);
+        details.appendChild(summary);
+
+        const ul = document.createElement("ul");
+        ul.className = "timeline-day-events";
+        dayEvents.forEach((ev) => {
+          const item = document.createElement("li");
+          const source = String(ev.source || "").replace(/^session\//, "");
+          const dot = document.createElement("span");
+          dot.className = `risk-dot ${String(ev.risk_tag || "unknown").toLowerCase()}`;
+          item.appendChild(dot);
+          item.appendChild(
+            document.createTextNode(
+              `${ev.metric}=${ev.value || "-"} ${ev.unit || ""} | ${ev.event_type} | ${source || "unknown"}`
+            )
+          );
+          ul.appendChild(item);
+        });
+        details.appendChild(ul);
+        card.appendChild(details);
+        timelineList.appendChild(card);
+      });
+    }
+
+    function attachRoundEvidence(div, sources, report, warning, keyConclusions, externalSources, literatureGuard, reasoningMode, reasoningMeta) {
+      const sourceList = Array.isArray(sources) ? sources : [];
+      const conclusions = Array.isArray(keyConclusions) ? keyConclusions : [];
+      const external = Array.isArray(externalSources) ? externalSources : [];
+      const litCoverage = literatureGuard?.coverage ?? "n/a";
+      const verified = Number(report?.verified_claims || 0);
+      const unsupported = Number(report?.unsupported_claims || 0);
+      const coverage = report?.coverage ?? "n/a";
+      const summaryText = `关键结论${conclusions.length}条 · 证据${sourceList.length}条 · 文献${external.length}条 · 证据契合=${coverage} · 文献契合=${litCoverage}`;
+
+      const wrapper = document.createElement("div");
+      wrapper.className = "round-meta";
+
+      const summary = document.createElement("div");
+      summary.className = "round-meta-summary";
+      summary.textContent = summaryText;
+      wrapper.appendChild(summary);
+
+      const panel = document.createElement("div");
+      panel.className = "round-meta-panel";
+      const grid = document.createElement("div");
+      grid.className = "round-meta-grid";
+
+      const left = document.createElement("div");
+      const leftTitle = document.createElement("div");
+      leftTitle.className = "muted";
+      leftTitle.textContent = "关键结论（证据状态）";
+      left.appendChild(leftTitle);
+      const conclusionWrap = document.createElement("div");
+      if (!conclusions.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted";
+        empty.textContent = "未提炼出高价值结论（请补充问题或病例信息）";
+        conclusionWrap.appendChild(empty);
+      } else {
+        const suffLabel = (suff) => {
+          const normalized = String(suff || "low").toLowerCase();
+          if (normalized === "high") return "充分";
+          if (normalized === "medium") return "基本充分";
+          return "待核实";
+        };
+        conclusions.forEach((c) => {
+          const card = document.createElement("div");
+          card.className = "conclusion-card";
+          const suff = String(c.sufficiency || "low");
+          const suffClass = suff === "high" ? "suff-high" : (suff === "medium" ? "suff-medium" : "suff-low");
+          const cited = (c.cited_ranks || []).join(",");
+          const score = Number(c.support_score || 0).toFixed(2);
+          const reason = c.reason || "暂无";
+          card.innerHTML = `<div>${c.claim || ""}</div><div class="${suffClass}">证据状态: ${suffLabel(suff)} · 证据#${cited}</div>`;
+          const details = document.createElement("details");
+          details.className = "slim conclusion-detail";
+          const summary = document.createElement("summary");
+          summary.textContent = "证据详情";
+          const detailBody = document.createElement("div");
+          detailBody.className = "muted";
+          detailBody.textContent = `匹配分数=${score}；原因=${reason}`;
+          details.appendChild(summary);
+          details.appendChild(detailBody);
+          card.appendChild(details);
+          conclusionWrap.appendChild(card);
+        });
+      }
+      left.appendChild(conclusionWrap);
+
+      const right = document.createElement("div");
+      const rightTitle = document.createElement("div");
+      rightTitle.className = "muted";
+      rightTitle.textContent = "引用片段（页码）";
+      right.appendChild(rightTitle);
+      const rightUl = document.createElement("ul");
+      rightUl.className = "mini-list";
+      if (!sourceList.length) {
+        const li = document.createElement("li");
+        li.textContent = "无引用";
+        rightUl.appendChild(li);
+      } else {
+        sourceList.slice(0, 6).forEach((s) => {
+          const li = document.createElement("li");
+          li.className = "source-row";
+          const score = typeof s.score === "number" ? s.score.toFixed(4) : "n/a";
+          const page = Number.isFinite(Number(s.page)) ? `P${Number(s.page)}` : "P?";
+          li.textContent = `#${s.rank || "-"} ${page} score=${score} ${s.source || ""}`;
+          li.title = s.evidence || s.preview || "";
+          rightUl.appendChild(li);
+        });
+      }
+      if (warning) {
+        const warn = document.createElement("li");
+        warn.style.color = "#b45309";
+        warn.textContent = warning;
+        rightUl.appendChild(warn);
+      }
+      right.appendChild(rightUl);
+
+      grid.appendChild(left);
+      grid.appendChild(right);
+
+      if (String(reasoningMode || "").toLowerCase() === "deep") {
+        const explain = document.createElement("div");
+        explain.className = "reasoning-note";
+        const reasons = Array.isArray(reasoningMeta?.reasons) ? reasoningMeta.reasons : [];
+        const reasonMap = {
+          query_long: "问题信息量较大",
+          multi_turn: "多轮病程信息",
+          timeline_complex: "时间线较复杂",
+          complex_intent: "涉及分期/方案/证据决策",
+          urgent_triage: "包含急症分诊信号",
+        };
+        const reasonText = reasons.length
+          ? reasons.map((x) => reasonMap[x] || x).join("；")
+          : "涉及复杂医学决策";
+        const uncertainty = unsupported > 0
+          ? `当前仍有 ${unsupported} 条结论证据不足，已按保守口径处理。`
+          : "当前关键结论证据基本充分。";
+        explain.textContent = `深度分析说明：因“${reasonText}”进入深度模式。关键依据：证据${sourceList.length}条，文献${external.length}条。${uncertainty}`;
+        grid.appendChild(explain);
+      }
+
+      if (external.length) {
+        const ext = document.createElement("div");
+        const extTitle = document.createElement("div");
+        extTitle.className = "muted";
+        extTitle.textContent = `外部学术文献（${external.length}条）`;
+        ext.appendChild(extTitle);
+        const extUl = document.createElement("ul");
+        extUl.className = "mini-list";
+        external.forEach((r, idx) => {
+          const li = document.createElement("li");
+          const a = document.createElement("a");
+          a.className = "ext-link";
+          const ptype = r.paper_type || "other";
+          a.textContent = `[文献#${idx + 1}] ${r.title || "untitled"} | ${ptype} | ${r.year || "n/a"} | ${r.source || "web"}`;
+          a.href = r.url || "#";
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          li.appendChild(a);
+          if (r.venue || r.doi) {
+            const meta = document.createElement("div");
+            meta.className = "muted";
+            meta.textContent = `venue=${r.venue || "n/a"} | doi=${r.doi || "n/a"}`;
+            li.appendChild(meta);
+          }
+          extUl.appendChild(li);
+        });
+        ext.appendChild(extUl);
+        grid.appendChild(ext);
+      }
+      panel.appendChild(grid);
+      wrapper.appendChild(panel);
+      div.appendChild(wrapper);
+    }
+
+    function sumRedaction(item) {
+      const redaction = item.redaction || {};
+      return Object.values(redaction).reduce((acc, n) => acc + Number(n || 0), 0);
+    }
+
+    async function refreshTimeline() {
+      try {
+        const res = await fetch("/api/session/timeline", { headers: authHeaders() });
+        const data = await res.json();
+        renderTimelinePanel(data.state || {}, data.events || []);
+        manualClearOnly = Boolean(data.manual_clear_only ?? true);
+        ttlRemainingSeconds = data.expires_in_seconds == null ? null : Number(data.expires_in_seconds);
+        ttlExpiredShown = ttlRemainingSeconds !== null && ttlRemainingSeconds <= 0 ? ttlExpiredShown : false;
+        updateTTLBanner();
+        setLifecycleState({ uploaded: true, redacted: true, inSession: Number(data.event_count || 0) > 0, ttl: false });
+      } catch (_) { }
+    }
+
+    async function refreshTTLProof() {
+      try {
+        const url = `/api/audit/ttl-proof?session_id=${encodeURIComponent(pageSessionId)}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        const items = data.items || [];
+        ttlProofList.innerHTML = "";
+        if (!items.length) {
+          const li = document.createElement("li");
+          li.textContent = "当前会话暂无销毁证明";
+          ttlProofList.appendChild(li);
+          return;
+        }
+        ttlRemainingSeconds = 0;
+        updateTTLBanner();
+        setLifecycleState({ uploaded: true, redacted: true, inSession: false, ttl: true });
+        items.slice(-5).reverse().forEach((item) => {
+          const li = document.createElement("li");
+          const ts = new Date((Number(item.timestamp) || 0) * 1000).toLocaleString();
+          li.innerHTML = `<span class="proof-ok">TTL-PROOF</span> ${ts}<br/>${item.details?.proof || "session_expired"}`;
+          ttlProofList.appendChild(li);
+        });
+      } catch (_) { }
+    }
+
+    async function expireNow() {
+      expireNowBtn.disabled = true;
+      try {
+        await fetch("/api/session/expire-now", {
+          method: "POST",
+          headers: authHeaders(),
+        });
+        ttlRemainingSeconds = 0;
+        updateTTLBanner();
+        await refreshTimeline();
+        await refreshTTLProof();
+      } catch (_) {
+        // Ignore and recover by polling.
+      } finally {
+        expireNowBtn.disabled = false;
+      }
+    }
+
+    /* ── Upload progress helpers ── */
+    const uploadProgressEl = document.getElementById("upload-progress");
+    const progressLabel = document.getElementById("progress-label");
+    const progressTimer = document.getElementById("progress-timer");
+    const progressBarFill = document.getElementById("progress-bar-fill");
+    const progressStepsEl = document.getElementById("progress-steps");
+    const progressFileStatus = document.getElementById("progress-file-status");
+    let uploadTimerHandle = null;
+
+    function showUploadProgress() { uploadProgressEl.classList.add("on"); }
+    function hideUploadProgress() { uploadProgressEl.classList.remove("on"); }
+
+    function startUploadTimer() {
+      const t0 = Date.now();
+      progressTimer.textContent = "00:00";
+      uploadTimerHandle = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - t0) / 1000);
+        const m = String(Math.floor(elapsed / 60)).padStart(2, "0");
+        const s = String(elapsed % 60).padStart(2, "0");
+        progressTimer.textContent = `${m}:${s}`;
+      }, 500);
+    }
+    function stopUploadTimer() {
+      if (uploadTimerHandle) { clearInterval(uploadTimerHandle); uploadTimerHandle = null; }
+    }
+
+    const UPLOAD_STAGES = [
+      { key: "read", label: "读取文件" },
+      { key: "ocr", label: "文字识别" },
+      { key: "deid", label: "隐私脱敏" },
+      { key: "embed", label: "向量入库" },
+      { key: "timeline", label: "时间线抽取" },
+    ];
+
+    function renderProgressSteps(activeKey) {
+      progressStepsEl.innerHTML = "";
+      let passedActive = false;
+      UPLOAD_STAGES.forEach(({ key, label }) => {
+        const tag = document.createElement("span");
+        tag.className = "progress-step-tag";
+        if (key === activeKey) {
+          tag.classList.add("active");
+          tag.textContent = `⏳ ${label}`;
+          passedActive = true;
+        } else if (!passedActive) {
+          tag.classList.add("done");
+          tag.textContent = `✓ ${label}`;
+        } else {
+          tag.textContent = label;
+        }
+        progressStepsEl.appendChild(tag);
+      });
+    }
+
+    function markAllStepsDone() {
+      progressStepsEl.innerHTML = "";
+      UPLOAD_STAGES.forEach(({ label }) => {
+        const tag = document.createElement("span");
+        tag.className = "progress-step-tag done";
+        tag.textContent = `✓ ${label}`;
+        progressStepsEl.appendChild(tag);
+      });
+    }
+
+    function setProgressPercent(pct) {
+      progressBarFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+    }
+
+    function renderFileResult(item) {
+      const li = document.createElement("li");
+      if (item.ok) {
+        const dateMsg = item.date_warning
+          ? ` | 日期状态=未识别 (${item.date_warning})`
+          : " | 日期状态=已识别";
+        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0}${dateMsg}`;
+
+        // ── Redaction visualization card ──
+        const redaction = item.redaction || {};
+        const totalRedacted = sumRedaction(item);
+        const preview = Array.isArray(item.redaction_preview) ? item.redaction_preview : [];
+        const imageRedaction = item.image_redaction || {};
+        const hasImageRedaction = imageRedaction.available || imageRedaction.reason === "no_sensitive_boxes" || imageRedaction.reason === "ocr_failed";
+
+        if (totalRedacted > 0 || preview.length || hasImageRedaction) {
+          const card = document.createElement("div");
+          card.className = "redact-card";
+
+          const title = document.createElement("div");
+          title.className = "redact-card-title";
+          title.textContent = totalRedacted > 0 ? `🛡️ 已脱敏 ${totalRedacted} 处敏感信息` : "🛡️ 隐私脱敏扫描完成";
+          card.appendChild(title);
+
+          const REDACT_LABELS = {
+            id_card: "身份证", phone: "手机号", email: "邮箱",
+            bank_card: "银行卡", name_field: "姓名", address_field: "地址"
+          };
+          const statsBar = document.createElement("div");
+          statsBar.className = "redact-stats";
+          Object.entries(REDACT_LABELS).forEach(([key, label]) => {
+            const n = Number(redaction[key] || 0);
+            const tag = document.createElement("span");
+            tag.className = `redact-stat redact-tag-${key}${n === 0 ? " zero" : ""}`;
+            tag.textContent = `${label} ×${n}`;
+            statsBar.appendChild(tag);
+          });
+          card.appendChild(statsBar);
+
+          if (hasImageRedaction && imageRedaction.masked_data_url) {
+            const toggleBar = document.createElement("div");
+            toggleBar.className = "redact-toggle-bar";
+            const btnMasked = document.createElement("button");
+            btnMasked.className = "redact-toggle-btn active";
+            btnMasked.textContent = "🔒 打码后";
+            const btnOriginal = document.createElement("button");
+            btnOriginal.className = "redact-toggle-btn";
+            btnOriginal.textContent = "📄 原图";
+            toggleBar.appendChild(btnMasked);
+            toggleBar.appendChild(btnOriginal);
+            card.appendChild(toggleBar);
+
+            const imgWrap = document.createElement("div");
+            imgWrap.className = "redact-img-wrap";
+            const maskedImg = document.createElement("img");
+            maskedImg.src = imageRedaction.masked_data_url;
+            maskedImg.alt = "打码预览";
+            imgWrap.appendChild(maskedImg);
+            const boxCount = Number(imageRedaction.sensitive_box_count || 0);
+            if (boxCount > 0) {
+              const badge = document.createElement("span");
+              badge.className = "redact-img-badge";
+              badge.textContent = `已遮挡 ${boxCount} 处`;
+              imgWrap.appendChild(badge);
+            }
+            card.appendChild(imgWrap);
+
+            let originalDataUrl = null;
+            const uploadedFile = Array.from(selectedUploadFiles.values()).find(uf => uf.name === item.file);
+            if (uploadedFile) {
+              const reader = new FileReader();
+              reader.onload = () => { originalDataUrl = reader.result; };
+              reader.readAsDataURL(uploadedFile);
+            }
+            btnMasked.addEventListener("click", () => {
+              maskedImg.src = imageRedaction.masked_data_url;
+              btnMasked.classList.add("active");
+              btnOriginal.classList.remove("active");
+            });
+            btnOriginal.addEventListener("click", () => {
+              if (originalDataUrl) maskedImg.src = originalDataUrl;
+              btnOriginal.classList.add("active");
+              btnMasked.classList.remove("active");
+            });
+          }
+
+          const boxes = Array.isArray(imageRedaction.boxes) ? imageRedaction.boxes : [];
+          if (boxes.length) {
+            const REDACT_LABELS_INNER = {
+              id_card: "身份证", phone: "手机号", email: "邮箱",
+              bank_card: "银行卡", name_field: "姓名", address_field: "地址"
+            };
+            const boxDetails = document.createElement("details");
+            boxDetails.className = "slim";
+            const boxSummary = document.createElement("summary");
+            boxSummary.textContent = `查看 ${boxes.length} 个敏感区域详情`;
+            boxDetails.appendChild(boxSummary);
+            const boxUl = document.createElement("ul");
+            boxUl.className = "redact-box-list";
+            boxes.forEach((box) => {
+              const boxLi = document.createElement("li");
+              boxLi.className = "redact-box-item";
+              const types = Array.isArray(box.types) ? box.types : [];
+              types.forEach(t => {
+                const typeTag = document.createElement("span");
+                const tagKey = t === "name_field" ? "name_field" : t === "address_field" ? "address_field" : t;
+                typeTag.className = `redact-stat redact-tag-${tagKey}`;
+                typeTag.textContent = REDACT_LABELS_INNER[t] || t;
+                typeTag.style.fontSize = "10px";
+                typeTag.style.padding = "1px 6px";
+                boxLi.appendChild(typeTag);
+              });
+              const txt = document.createElement("span");
+              const rawText = String(box.text || "");
+              txt.textContent = rawText.length > 30 ? rawText.slice(0, 30) + "..." : rawText;
+              boxLi.appendChild(txt);
+              const coord = document.createElement("span");
+              coord.className = "redact-box-coord";
+              coord.textContent = `(${box.x1},${box.y1})→(${box.x2},${box.y2})`;
+              boxLi.appendChild(coord);
+              boxUl.appendChild(boxLi);
+            });
+            boxDetails.appendChild(boxUl);
+            card.appendChild(boxDetails);
+          }
+
+          if (preview.length) {
+            const textDetails = document.createElement("details");
+            textDetails.className = "slim";
+            const textSummary = document.createElement("summary");
+            textSummary.textContent = "查看文本脱敏位置";
+            textDetails.appendChild(textSummary);
+            const pre = document.createElement("div");
+            pre.className = "redact-text-preview";
+            const TOKEN_HL = {
+              "<ID_CARD>": "redact-hl-id_card",
+              "<PHONE>": "redact-hl-phone",
+              "<EMAIL>": "redact-hl-email",
+              "<BANK_CARD>": "redact-hl-bank_card",
+              "<NAME>": "redact-hl-name",
+              "<ADDRESS>": "redact-hl-address",
+            };
+            const TOKEN_DISPLAY = {
+              "<ID_CARD>": "[身份证已脱敏]",
+              "<PHONE>": "[手机号已脱敏]",
+              "<EMAIL>": "[邮箱已脱敏]",
+              "<BANK_CARD>": "[银行卡已脱敏]",
+              "<NAME>": "[姓名已脱敏]",
+              "<ADDRESS>": "[地址已脱敏]",
+            };
+            preview.forEach((line, idx) => {
+              if (idx > 0) pre.appendChild(document.createElement("br"));
+              let remaining = line;
+              const tokenPattern = /<(ID_CARD|PHONE|EMAIL|BANK_CARD|NAME|ADDRESS)>/g;
+              let match;
+              let lastIdx2 = 0;
+              while ((match = tokenPattern.exec(remaining)) !== null) {
+                if (match.index > lastIdx2) {
+                  pre.appendChild(document.createTextNode(remaining.slice(lastIdx2, match.index)));
+                }
+                const token = match[0];
+                const span = document.createElement("span");
+                span.className = TOKEN_HL[token] || "";
+                span.textContent = TOKEN_DISPLAY[token] || token;
+                pre.appendChild(span);
+                lastIdx2 = match.index + match[0].length;
+              }
+              if (lastIdx2 < remaining.length) {
+                pre.appendChild(document.createTextNode(remaining.slice(lastIdx2)));
+              }
+            });
+            textDetails.appendChild(pre);
+            card.appendChild(textDetails);
+          }
+
+          li.appendChild(card);
+        }
+      } else {
+        li.textContent = `${item.file} | 上传失败: ${item.error || "未知错误"}`;
+      }
+      filesList.appendChild(li);
+    }
+
+    async function uploadFiles() {
+      if (!selectedUploadFiles.size) {
+        renderPendingUploadFiles();
+        return;
+      }
+      const allFiles = Array.from(selectedUploadFiles.values());
+      const total = allFiles.length;
+
+      uploadBtn.disabled = true;
+      filesList.innerHTML = "";
+      showUploadProgress();
+      startUploadTimer();
+
+      let completed = 0;
+      let hasError = false;
+
+      for (let i = 0; i < total; i++) {
+        const file = allFiles[i];
+        const fileNum = i + 1;
+        uploadBtn.textContent = `处理中... (${fileNum}/${total})`;
+        progressLabel.textContent = `正在处理：${file.name}（${fileNum}/${total}）`;
+        setProgressPercent(((i) / total) * 100);
+        renderProgressSteps("read");
+        progressFileStatus.textContent = `读取文件 ${file.name}...`;
+
+        // Brief read step visibility
+        await new Promise(r => setTimeout(r, 80));
+        renderProgressSteps("ocr");
+        progressFileStatus.textContent = "识别文字中...";
+
+        try {
+          const form = new FormData();
+          form.append("files", file);
+
+          // Animate stage transitions during server processing
+          const stageTimer = setTimeout(() => {
+            renderProgressSteps("deid");
+            progressFileStatus.textContent = "隐私脱敏处理中...";
+          }, 2000);
+          const stageTimer2 = setTimeout(() => {
+            renderProgressSteps("embed");
+            progressFileStatus.textContent = "向量入库中...";
+          }, 4500);
+          const stageTimer3 = setTimeout(() => {
+            renderProgressSteps("timeline");
+            progressFileStatus.textContent = "时间线事件抽取中...";
+          }, 7000);
+
+          const res = await fetch("/api/upload", {
+            method: "POST",
+            headers: authHeaders(),
+            body: form,
+          });
+
+          clearTimeout(stageTimer);
+          clearTimeout(stageTimer2);
+          clearTimeout(stageTimer3);
+
+          const data = await res.json();
+          completed++;
+          setProgressPercent((completed / total) * 100);
+          markAllStepsDone();
+          progressFileStatus.textContent = `✓ ${file.name} 处理完成`;
+
+          (data.results || []).forEach((item) => renderFileResult(item));
+          if (data.results?.some(r => !r.ok)) hasError = true;
+
+        } catch (err) {
+          completed++;
+          hasError = true;
+          setProgressPercent((completed / total) * 100);
+          const li = document.createElement("li");
+          li.textContent = `${file.name} | 上传失败: ${err?.message || "网络错误"}`;
+          filesList.appendChild(li);
+          progressFileStatus.textContent = `✗ ${file.name} 处理失败`;
+        }
+      }
+
+      // All done
+      stopUploadTimer();
+      progressLabel.textContent = `全部完成（${completed}/${total}）`;
+      setProgressPercent(100);
+      markAllStepsDone();
+      progressFileStatus.textContent = hasError ? "部分文件处理失败，请查看详情" : "全部文件处理成功 ✓";
+
+      setLifecycleState({ uploaded: true, redacted: true, inSession: true, ttl: false });
+      await refreshTimeline();
+      await refreshTTLProof();
+      selectedUploadFiles.clear();
+      fileInput.value = "";
+
+      uploadBtn.disabled = false;
+      uploadBtn.textContent = "上传并入库";
+
+      // Auto-hide progress after 8 seconds
+      setTimeout(() => { hideUploadProgress(); }, 8000);
+    }
+
+    function renderFileResult(item) {
+      const li = document.createElement("li");
+      if (item.ok) {
+        const dateMsg = item.date_detected
+          ? ` | 日期=${item.timeline_date}(${item.timeline_date_source})`
+          : " | 日期=未知";
+        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0}${dateMsg}`;
+
+        // ── Redaction visualization card ──
+        const redaction = item.redaction || {};
+        const totalRedacted = sumRedaction(item);
+        const preview = Array.isArray(item.redaction_preview) ? item.redaction_preview : [];
+        const imageRedaction = item.image_redaction || {};
+        const hasImageRedaction = imageRedaction.available || imageRedaction.reason === "no_sensitive_boxes" || imageRedaction.reason === "ocr_failed";
+
+        if (totalRedacted > 0 || preview.length || hasImageRedaction) {
+          const card = document.createElement("div");
+          card.className = "redact-card";
+
+          // Title
+          const title = document.createElement("div");
+          title.className = "redact-card-title";
+          title.textContent = totalRedacted > 0 ? `🛡️ 已脱敏 ${totalRedacted} 处敏感信息` : "🛡️ 隐私脱敏扫描完成";
+          card.appendChild(title);
+
+          // Stats bar
+          const REDACT_LABELS = {
+            id_card: "身份证", phone: "手机号", email: "邮箱",
+            bank_card: "银行卡", name_field: "姓名", address_field: "地址"
+          };
+          const statsBar = document.createElement("div");
+          statsBar.className = "redact-stats";
+          Object.entries(REDACT_LABELS).forEach(([key, label]) => {
+            const n = Number(redaction[key] || 0);
+            const tag = document.createElement("span");
+            tag.className = `redact-stat redact-tag-${key}${n === 0 ? " zero" : ""}`;
+            tag.textContent = `${label} ×${n}`;
+            statsBar.appendChild(tag);
+          });
+          card.appendChild(statsBar);
+
+          // Image toggle (original vs masked)
+          if (hasImageRedaction && imageRedaction.masked_data_url) {
+            const toggleBar = document.createElement("div");
+            toggleBar.className = "redact-toggle-bar";
+            const btnMasked = document.createElement("button");
+            btnMasked.className = "redact-toggle-btn active";
+            btnMasked.textContent = "🔒 打码后";
+            const btnOriginal = document.createElement("button");
+            btnOriginal.className = "redact-toggle-btn";
+            btnOriginal.textContent = "📄 原图";
+            toggleBar.appendChild(btnMasked);
+            toggleBar.appendChild(btnOriginal);
+            card.appendChild(toggleBar);
+
+            const imgWrap = document.createElement("div");
+            imgWrap.className = "redact-img-wrap";
+            const maskedImg = document.createElement("img");
+            maskedImg.src = imageRedaction.masked_data_url;
+            maskedImg.alt = "打码预览";
+            imgWrap.appendChild(maskedImg);
+            const boxCount = Number(imageRedaction.sensitive_box_count || 0);
+            if (boxCount > 0) {
+              const badge = document.createElement("span");
+              badge.className = "redact-img-badge";
+              badge.textContent = `已遮挡 ${boxCount} 处`;
+              imgWrap.appendChild(badge);
+            }
+            card.appendChild(imgWrap);
+
+            // Build original image data URL from upload for toggle
+            let originalDataUrl = null;
+            const uploadedFile = Array.from(selectedUploadFiles.values()).find(uf => uf.name === item.file);
+            if (uploadedFile) {
+              const reader = new FileReader();
+              reader.onload = () => { originalDataUrl = reader.result; };
+              reader.readAsDataURL(uploadedFile);
+            }
+            let showingMasked = true;
+            btnMasked.addEventListener("click", () => {
+              maskedImg.src = imageRedaction.masked_data_url;
+              btnMasked.classList.add("active");
+              btnOriginal.classList.remove("active");
+              showingMasked = true;
+            });
+            btnOriginal.addEventListener("click", () => {
+              if (originalDataUrl) {
+                maskedImg.src = originalDataUrl;
+              }
+              btnOriginal.classList.add("active");
+              btnMasked.classList.remove("active");
+              showingMasked = false;
+            });
+          }
+
+          // Sensitive box detail list
+          const boxes = Array.isArray(imageRedaction.boxes) ? imageRedaction.boxes : [];
+          if (boxes.length) {
+            const boxDetails = document.createElement("details");
+            boxDetails.className = "slim";
+            const boxSummary = document.createElement("summary");
+            boxSummary.textContent = `查看 ${boxes.length} 个敏感区域详情`;
+            boxDetails.appendChild(boxSummary);
+            const boxUl = document.createElement("ul");
+            boxUl.className = "redact-box-list";
+            boxes.forEach((box, idx) => {
+              const boxLi = document.createElement("li");
+              boxLi.className = "redact-box-item";
+              const types = Array.isArray(box.types) ? box.types : [];
+              types.forEach(t => {
+                const typeTag = document.createElement("span");
+                const tagKey = t === "name_field" ? "name_field" : t === "address_field" ? "address_field" : t;
+                typeTag.className = `redact-stat redact-tag-${tagKey}`;
+                typeTag.textContent = REDACT_LABELS[t] || t;
+                typeTag.style.fontSize = "10px";
+                typeTag.style.padding = "1px 6px";
+                boxLi.appendChild(typeTag);
+              });
+              const txt = document.createElement("span");
+              const rawText = String(box.text || "");
+              txt.textContent = rawText.length > 30 ? rawText.slice(0, 30) + "..." : rawText;
+              boxLi.appendChild(txt);
+              const coord = document.createElement("span");
+              coord.className = "redact-box-coord";
+              coord.textContent = `(${box.x1},${box.y1})→(${box.x2},${box.y2})`;
+              boxLi.appendChild(coord);
+              boxUl.appendChild(boxLi);
+            });
+            boxDetails.appendChild(boxUl);
+            card.appendChild(boxDetails);
+          }
+
+          // Text redaction preview with colored highlights
+          if (preview.length) {
+            const textDetails = document.createElement("details");
+            textDetails.className = "slim";
+            const textSummary = document.createElement("summary");
+            textSummary.textContent = "查看文本脱敏位置";
+            textDetails.appendChild(textSummary);
+            const pre = document.createElement("div");
+            pre.className = "redact-text-preview";
+            const TOKEN_HL = {
+              "<ID_CARD>": "redact-hl-id_card",
+              "<PHONE>": "redact-hl-phone",
+              "<EMAIL>": "redact-hl-email",
+              "<BANK_CARD>": "redact-hl-bank_card",
+              "<NAME>": "redact-hl-name",
+              "<ADDRESS>": "redact-hl-address",
+            };
+            const TOKEN_DISPLAY = {
+              "<ID_CARD>": "[身份证已脱敏]",
+              "<PHONE>": "[手机号已脱敏]",
+              "<EMAIL>": "[邮箱已脱敏]",
+              "<BANK_CARD>": "[银行卡已脱敏]",
+              "<NAME>": "[姓名已脱敏]",
+              "<ADDRESS>": "[地址已脱敏]",
+            };
+            preview.forEach((line, idx) => {
+              if (idx > 0) pre.appendChild(document.createElement("br"));
+              // Split line by tokens and create highlighted spans
+              let remaining = line;
+              const tokenPattern = /<(ID_CARD|PHONE|EMAIL|BANK_CARD|NAME|ADDRESS)>/g;
+              let match;
+              let lastIdx = 0;
+              while ((match = tokenPattern.exec(remaining)) !== null) {
+                if (match.index > lastIdx) {
+                  pre.appendChild(document.createTextNode(remaining.slice(lastIdx, match.index)));
+                }
+                const token = match[0];
+                const span = document.createElement("span");
+                span.className = TOKEN_HL[token] || "";
+                span.textContent = TOKEN_DISPLAY[token] || token;
+                pre.appendChild(span);
+                lastIdx = match.index + match[0].length;
+              }
+              if (lastIdx < remaining.length) {
+                pre.appendChild(document.createTextNode(remaining.slice(lastIdx)));
+              }
+            });
+            textDetails.appendChild(pre);
+            card.appendChild(textDetails);
+          }
+
+          li.appendChild(card);
+        }
+      } else {
+        li.textContent = `${item.file} | 上传失败: ${item.error || "未知错误"}`;
+      }
+      filesList.appendChild(li);
+    }
+
+    async function sendMessage() {
+      const input = document.getElementById("message");
+      const text = input.value.trim();
+      if (!text) return;
+      sendBtn.disabled = true;
+      renderMessage("user", text);
+      input.value = "";
+      showAssistantLoading();
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders(),
+          },
+          body: JSON.stringify({ message: text, history }),
+        });
+        const data = await res.json();
+        hideAssistantLoading();
+        const assistantDiv = renderMessage("assistant", data.answer || "出错了，请稍后重试。");
+        history.push({ role: "user", content: text });
+        history.push({ role: "assistant", content: data.answer || "" });
+        attachRoundEvidence(
+          assistantDiv,
+          data.sources || [],
+          data.evidence_guard || null,
+          data.citation_warning || "",
+          data.key_conclusions || [],
+          data.external_sources || [],
+          data.literature_guard || null,
+          data.reasoning_mode || "",
+          data.reasoning_meta || null,
+        );
+        await refreshTimeline();
+        await refreshTTLProof();
+      } catch (err) {
+        hideAssistantLoading();
+        renderMessage("assistant", `出错了：${err?.message || "网络错误"}`);
+      } finally {
+        hideAssistantLoading();
+        sendBtn.disabled = false;
+      }
+    }
+
+    async function importGuidelines() {
+      const tokenInput = document.getElementById("internal-token");
+      const reset = document.getElementById("internal-reset").checked;
+      const headers = { "Content-Type": "application/json" };
+      if (tokenInput.value.trim()) headers["X-Internal-Token"] = tokenInput.value.trim();
+
+      importBtn.disabled = true;
+      importBtn.textContent = "导入中...";
+      importList.innerHTML = "";
+
+      try {
+        const res = await fetch("/api/internal/import-guidelines", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ reset }),
+        });
+        const data = await res.json();
+        (data.results || []).forEach((item) => {
+          const li = document.createElement("li");
+          li.textContent = item.ok ? `${item.file} | chunks=${item.chunks}` : `${item.file} | 失败: ${item.error || "未知错误"}`;
+          importList.appendChild(li);
+        });
+        const sum = document.createElement("li");
+        sum.textContent = `完成: internal_chunks=${data.internal_chunks ?? 0}`;
+        importList.appendChild(sum);
+      } catch (err) {
+        const li = document.createElement("li");
+        li.textContent = `导入失败: ${err?.message || "网络错误"}`;
+        importList.appendChild(li);
+      } finally {
+        importBtn.disabled = false;
+        importBtn.textContent = "导入内部指南";
+      }
+    }
+
+    document.getElementById("upload-btn").addEventListener("click", uploadFiles);
+    fileInput.addEventListener("change", () => {
+      Array.from(fileInput.files || []).forEach((f) => {
+        selectedUploadFiles.set(fileKey(f), f);
+      });
+      fileInput.value = "";
+      renderPendingUploadFiles();
+    });
+    document.getElementById("send-btn").addEventListener("click", sendMessage);
+    document.getElementById("import-guidelines-btn").addEventListener("click", importGuidelines);
+    document.getElementById("expire-now-btn").addEventListener("click", expireNow);
+    document.getElementById("message").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") sendMessage();
+    });
+
+    renderMessage("assistant", "你好，我会优先参考内部医学指南，再结合你上传的病例进行带证据回答。\n\n请先上传病例文件，然后提问。")
+    renderPendingUploadFiles();
+    // Auth flow: try auto-login with saved token, or show login overlay
+    tryAutoLogin();
+    setInterval(refreshTTLProof, 15000);
+  </script>
+</body>
+
 </html>

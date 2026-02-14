@@ -1,0 +1,9 @@
+{
+  "last_success_date": "2026/02/14",
+  "last_run_at": 1771068878,
+  "last_topic_query": "(breast cancer OR mammary carcinoma OR breast neoplasm) AND (clinical OR guideline OR trial OR treatment)",
+  "fetched_raw": 120,
+  "normalized_kept": 105,
+  "total_records": 112,
+  "total_chunks": 311
+}
