@@ -53,6 +53,47 @@ def _replace_match_with_count(
     return pattern.sub(_sub, text), count
 
 
+def _is_valid_id_card(digits: str) -> bool:
+    """Validate a Chinese mainland 18-digit ID card number.
+
+    Checks: (1) valid province prefix (11-82), (2) plausible date in positions
+    6-14, and (3) the standard MOD-11 weighted checksum.
+    """
+    clean = re.sub(r"\s", "", digits)
+    if len(clean) != 18:
+        return False
+    province = int(clean[:2])
+    # Valid province codes: 11-15, 21-23, 31-37, 41-46, 50-54, 61-65, 71, 81, 82
+    _VALID_PROVINCES = {
+        11, 12, 13, 14, 15,
+        21, 22, 23,
+        31, 32, 33, 34, 35, 36, 37,
+        41, 42, 43, 44, 45, 46,
+        50, 51, 52, 53, 54,
+        61, 62, 63, 64, 65,
+        71, 81, 82,
+    }
+    if province not in _VALID_PROVINCES:
+        return False
+    # Basic date plausibility check (YYYYMMDD at positions 6-14).
+    year_str, month_str, day_str = clean[6:10], clean[10:12], clean[12:14]
+    try:
+        year, month, day = int(year_str), int(month_str), int(day_str)
+    except ValueError:
+        return False
+    if not (1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31):
+        return False
+    # MOD-11 weighted checksum.
+    weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
+    check_chars = "10X98765432"
+    try:
+        total = sum(int(clean[i]) * weights[i] for i in range(17))
+    except (ValueError, IndexError):
+        return False
+    expected = check_chars[total % 11]
+    return clean[17].upper() == expected
+
+
 def redact_sensitive_info(text: str) -> tuple[str, RedactionStats]:
     content = text
     # Normalize common OCR spacing variants first.
@@ -63,11 +104,29 @@ def redact_sensitive_info(text: str) -> tuple[str, RedactionStats]:
     stats = RedactionStats()
 
     # Chinese mainland ID card number.
-    content, stats.id_card = _replace_with_count(
-        re.compile(r"(?<!\d)(\d{6}\s*\d{8}\s*[\dXx]{4})(?!\d)"),
-        content,
-        "<ID_CARD>",
+    # Use a callback to validate each candidate via checksum before redacting,
+    # avoiding false positives on medical codes (ultrasound numbers, etc.).
+    _ID_CARD_PAT = re.compile(
+        r"(?<![A-Za-z\d])"          # not preceded by letter or digit
+        r"(\d{6}\s*\d{8}\s*[\dXx]{4})"
+        r"(?!\d)"                    # not followed by digit
     )
+
+    def _id_card_sub(match: re.Match[str]) -> str:
+        candidate = match.group(1)
+        if _is_valid_id_card(candidate):
+            return "<ID_CARD>"
+        return match.group(0)  # leave unchanged
+
+    content, stats.id_card = _replace_match_with_count(
+        _ID_CARD_PAT,
+        content,
+        _id_card_sub,
+    )
+    # The count above includes *all* regex hits; recalculate to count only
+    # those that were actually replaced.
+    stats.id_card = content.count("<ID_CARD>") - text.count("<ID_CARD>")
+
     # Mainland phone number.
     content, stats.phone = _replace_with_count(
         re.compile(r"(?<!\d)(1[3-9]\d[\s-]?\d{4}[\s-]?\d{4})(?!\d)"),
@@ -79,9 +138,9 @@ def redact_sensitive_info(text: str) -> tuple[str, RedactionStats]:
         content,
         "<EMAIL>",
     )
-    # Common bank card range.
+    # Common bank card range — also skip numbers preceded by letters.
     content, stats.bank_card = _replace_with_count(
-        re.compile(r"(?<!\d)(\d{16,19})(?!\d)"),
+        re.compile(r"(?<![A-Za-z\d])(\d{16,19})(?!\d)"),
         content,
         "<BANK_CARD>",
     )
