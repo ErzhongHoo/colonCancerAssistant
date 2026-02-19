@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import base64
+import json
 import mimetypes
 import os
 import re
@@ -51,6 +52,7 @@ from app.ocr import (
 )
 from app.privacy import detect_sensitive_types, extract_redaction_preview, redact_sensitive_info
 from app.rag import split_text
+from app.openviking import OpenVikingStore
 from app.timeline import (
     ClinicalEvent,
     build_retrieval_hint,
@@ -129,6 +131,13 @@ AUTO_EVIDENCE_REWRITE = (
 )
 EVIDENCE_REWRITE_MIN_COVERAGE = float(os.getenv("EVIDENCE_REWRITE_MIN_COVERAGE", "0.75"))
 EVIDENCE_REWRITE_MAX_UNSUPPORTED = max(int(os.getenv("EVIDENCE_REWRITE_MAX_UNSUPPORTED", "1")), 0)
+OPENVIKING_ENABLED = os.getenv("OPENVIKING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+OPENVIKING_USE_LLM = os.getenv("OPENVIKING_USE_LLM", "true").strip().lower() in {"1", "true", "yes", "on"}
+OPENVIKING_L0_TOPK = max(int(os.getenv("OPENVIKING_L0_TOPK", "3")), 1)
+OPENVIKING_L1_TOPK = max(int(os.getenv("OPENVIKING_L1_TOPK", "4")), 1)
+OPENVIKING_L2_TOPK = max(int(os.getenv("OPENVIKING_L2_TOPK", "2")), 0)
+OPENVIKING_SUMMARY_INPUT_CHARS = max(int(os.getenv("OPENVIKING_SUMMARY_INPUT_CHARS", "10000")), 1200)
+OPENVIKING_EVIDENCE_SNIPPET_MAX_CHARS = max(int(os.getenv("OPENVIKING_EVIDENCE_SNIPPET_MAX_CHARS", "700")), 240)
 
 app = FastAPI(title="Colon Cancer RAG MVP")
 client = build_client()
@@ -189,19 +198,29 @@ class SessionStoreState:
     updated_at: float
 
 
+@dataclass
+class RetrievedContext:
+    id: str
+    source: str
+    text: str
+    layer: str = "L2"
+    title: str = ""
+    refs: list[str] | None = None
+
+
 session_stores: dict[str, SessionStoreState] = {}
 session_timeline_events: dict[str, list[ClinicalEvent]] = {}
 # Per-user persistent stores (lazy loaded)
 user_stores: dict[str, VectorStore] = {}
 user_timeline_events: dict[str, list[ClinicalEvent]] = {}
+session_openviking_stores: dict[str, OpenVikingStore] = {}
+user_openviking_stores: dict[str, OpenVikingStore] = {}
 literature_index: dict[str, dict[str, object]] = load_index()
 literature_last_refresh_at = 0.0
 literature_last_refresh_result: dict[str, Any] = {}
 
 if literature_index and LITERATURE_STATE_PATH.exists():
     try:
-        import json
-
         state_payload = json.loads(LITERATURE_STATE_PATH.read_text(encoding="utf-8"))
         literature_last_refresh_at = float(state_payload.get("last_run_at", 0) or 0)
     except Exception:
@@ -260,7 +279,10 @@ def _refresh_local_literature_if_needed(force: bool = False, max_results: int | 
 def _expire_session(session_id: str, reason: str = "ttl") -> bool:
     removed_store = session_stores.pop(session_id, None)
     removed_events = session_timeline_events.pop(session_id, [])
+    removed_openviking = session_openviking_stores.pop(session_id, None)
     removed = removed_store is not None or bool(removed_events)
+    if removed_openviking is not None:
+        removed = True
     if removed:
         audit_logger.log(
             event_type="session_expired",
@@ -268,6 +290,7 @@ def _expire_session(session_id: str, reason: str = "ttl") -> bool:
             details={
                 "ttl_seconds": SESSION_TTL_SECONDS,
                 "dropped_timeline_events": len(removed_events),
+                "dropped_openviking_items": removed_openviking.stats().get("total", 0) if removed_openviking else 0,
                 "proof": "session_vector_store_removed",
                 "reason": reason,
             },
@@ -388,6 +411,316 @@ def _get_session_store(session_id: str) -> VectorStore | None:
         return None
     state.updated_at = time.time()
     return state.store
+
+
+def _get_or_create_user_openviking_store(user_id: str) -> OpenVikingStore:
+    if user_id in user_openviking_stores:
+        return user_openviking_stores[user_id]
+    user_dir = user_manager.get_user_data_dir(user_id)
+    store = OpenVikingStore(user_dir / "openviking_layers.json", namespace=f"user-{user_id}")
+    user_openviking_stores[user_id] = store
+    return store
+
+
+def _get_user_openviking_store(user_id: str) -> OpenVikingStore:
+    return _get_or_create_user_openviking_store(user_id)
+
+
+def _get_or_create_session_openviking_store(session_id: str) -> OpenVikingStore:
+    _cleanup_expired_sessions()
+    store = session_openviking_stores.get(session_id)
+    if store is None:
+        store = OpenVikingStore(None, namespace=f"session-{session_id}")
+        session_openviking_stores[session_id] = store
+    return store
+
+
+def _get_session_openviking_store(session_id: str) -> OpenVikingStore | None:
+    _cleanup_expired_sessions()
+    return session_openviking_stores.get(session_id)
+
+
+def _extract_json_object(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return "{}"
+    m = re.search(r"\{[\s\S]*\}", text)
+    return m.group(0) if m else text
+
+
+def _fallback_openviking_layers(source: str, chunks: list[Any]) -> tuple[str, list[dict[str, Any]]]:
+    texts = [str(getattr(c, "text", "")).strip() for c in chunks if str(getattr(c, "text", "")).strip()]
+    if not texts:
+        return ("暂无摘要。", [{"title": "概览", "summary": "暂无可用文本内容。"}])
+    merged = "\n".join(texts[:8])
+    tnm_hits = list(dict.fromkeys(re.findall(r"[cCpPyYrR]?[Tt][0-4][a-cA-C]?\s*[Nn][0-3][a-cA-C]?\s*[Mm][0-1][a-cA-C]?", merged)))
+    stage_hits = list(dict.fromkeys(re.findall(r"(?:IIIC|IIIB|IIIA|IV|III|II|I)\s*期", merged, flags=re.IGNORECASE)))
+    diagnosis_line = ""
+    for line in re.split(r"[。\n]", merged):
+        if any(k in line for k in ("诊断", "乳腺", "癌", "肿瘤")):
+            diagnosis_line = line.strip()
+            if diagnosis_line:
+                break
+    l1: list[dict[str, Any]] = []
+    if diagnosis_line:
+        l1.append({"title": "诊断概览", "summary": diagnosis_line[:220]})
+    if tnm_hits or stage_hits:
+        l1.append(
+            {
+                "title": "分期信息",
+                "summary": f"TNM: {', '.join(tnm_hits) if tnm_hits else '未见明确TNM'}；分期: {', '.join(stage_hits) if stage_hits else '未见明确分期'}",
+            }
+        )
+    l1.append({"title": "原文片段", "summary": merged[:420]})
+    source_name = source.removeprefix("session/")
+    l0 = f"{source_name} 病历摘要：{diagnosis_line[:120] if diagnosis_line else '存在肿瘤相关病历信息'}。"
+    if tnm_hits:
+        l0 += f" 关键TNM：{', '.join(tnm_hits[:2])}。"
+    if stage_hits:
+        l0 += f" 临床分期：{', '.join(stage_hits[:2])}。"
+    return l0[:260], l1[:3]
+
+
+def _generate_openviking_layers(source: str, chunks: list[Any]) -> tuple[str, list[dict[str, Any]]]:
+    fallback_l0, fallback_l1 = _fallback_openviking_layers(source, chunks)
+    if not OPENVIKING_USE_LLM:
+        return fallback_l0, fallback_l1
+    lines: list[str] = []
+    total_chars = 0
+    max_chars = OPENVIKING_SUMMARY_INPUT_CHARS
+    for idx, c in enumerate(chunks, start=1):
+        text = str(getattr(c, "text", "")).strip()
+        if not text:
+            continue
+        piece = f"[chunk#{idx}] {text}"
+        if total_chars + len(piece) > max_chars:
+            remain = max_chars - total_chars
+            if remain > 120:
+                lines.append(piece[:remain])
+            break
+        lines.append(piece)
+        total_chars += len(piece)
+    payload = "\n\n".join(lines).strip()
+    if not payload:
+        return fallback_l0, fallback_l1
+
+    try:
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是OpenViking分层摘要器。"
+                        "请把L2病历片段整理为可检索的L1/L0，并严格返回JSON。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "仅输出JSON，格式为："
+                        "{\"l0_abstract\":\"...\","
+                        "\"l1_overviews\":[{\"title\":\"...\",\"summary\":\"...\"}]}\n"
+                        "要求：\n"
+                        "1) l1_overviews 输出1-3条，每条聚焦不同主题；\n"
+                        "2) 优先保留诊断、TNM/分期、治疗方案、影像/病理结论；\n"
+                        "3) 不要编造未出现的信息；\n"
+                        f"4) source={source}\n\n"
+                        f"L2输入:\n{payload}"
+                    ),
+                },
+            ],
+            temperature=0.0,
+        )
+        raw = resp.choices[0].message.content or ""
+        parsed = json.loads(_extract_json_object(raw))
+        l0 = str(parsed.get("l0_abstract", "") or "").strip()
+        l1_raw = parsed.get("l1_overviews", [])
+        l1: list[dict[str, Any]] = []
+        if isinstance(l1_raw, list):
+            for obj in l1_raw[:3]:
+                if not isinstance(obj, dict):
+                    continue
+                title = str(obj.get("title", "") or "").strip()
+                summary = str(obj.get("summary", "") or "").strip()
+                if not summary:
+                    continue
+                l1.append({"title": title[:60], "summary": summary[:360]})
+        if not l0:
+            l0 = fallback_l0
+        if not l1:
+            l1 = fallback_l1
+        return l0[:260], l1[:3]
+    except Exception:
+        return fallback_l0, fallback_l1
+
+
+def _upsert_openviking_layers(store: OpenVikingStore, source: str, chunks: list[Any]) -> dict[str, int]:
+    if not OPENVIKING_ENABLED:
+        return {"l0": 0, "l1": 0}
+    l0_text, l1_items = _generate_openviking_layers(source, chunks)
+    return store.upsert_source_layers(
+        source=source,
+        l0_text=l0_text,
+        l1_items=l1_items,
+        embed_fn=_global_embed,
+    )
+
+
+def _top_chunks_from_sources(
+    vector_store: VectorStore | None,
+    query_embedding: list[float],
+    sources: list[str],
+    k: int = 2,
+) -> list[tuple[float, Any]]:
+    if vector_store is None or not sources:
+        return []
+    source_set = {str(s) for s in sources if str(s)}
+    if not source_set:
+        return []
+    candidates = [c for c in getattr(vector_store, "chunks", []) if str(getattr(c, "source", "")) in source_set]
+    if not candidates:
+        return []
+    q = np.array(query_embedding, dtype=np.float32)
+    matrix = np.array([c.embedding for c in candidates], dtype=np.float32)
+    norms = np.linalg.norm(matrix, axis=1)
+    qn = np.linalg.norm(q)
+    denom = np.maximum(norms * qn, 1e-8)
+    scores = (matrix @ q) / denom
+    idx = np.argsort(scores)[::-1][: max(int(k), 1)]
+    out: list[tuple[float, Any]] = []
+    for i in idx:
+        out.append((float(scores[i]), candidates[int(i)]))
+    return out
+
+
+def _build_evidence_snippet(text: str, query: str, max_chars: int = OPENVIKING_EVIDENCE_SNIPPET_MAX_CHARS) -> str:
+    payload = str(text or "")
+    if not payload:
+        return ""
+    if len(payload) <= max_chars:
+        return payload
+    tokens = re.findall(r"[A-Za-z0-9_+\-]{2,}|[\u4e00-\u9fff]{2,}", str(query or ""))
+    ignored = {"请问", "怎么", "什么", "这个", "那个", "一下", "需要", "建议", "可以", "是否"}
+    tokens = [t for t in tokens if t not in ignored]
+    for tok in tokens:
+        p = payload.lower().find(tok.lower())
+        if p >= 0:
+            half = max_chars // 2
+            start = max(0, p - half)
+            end = min(len(payload), start + max_chars)
+            return payload[start:end].strip()
+    return payload[:max_chars].strip()
+
+
+def _rebuild_openviking_from_vector_store(
+    layered_store: OpenVikingStore,
+    vector_store: VectorStore | None,
+    reset: bool = True,
+) -> dict[str, Any]:
+    if vector_store is None:
+        return {"sources": 0, "rebuilt": [], "stats": layered_store.stats()}
+    source_map: dict[str, list[Any]] = {}
+    for chunk in getattr(vector_store, "chunks", []):
+        src = str(getattr(chunk, "source", "") or "")
+        if not src:
+            continue
+        source_map.setdefault(src, []).append(chunk)
+    if not source_map:
+        if reset:
+            layered_store.clear()
+        return {"sources": 0, "rebuilt": [], "stats": layered_store.stats()}
+    if reset:
+        layered_store.clear()
+    rebuilt: list[dict[str, Any]] = []
+    for src in sorted(source_map.keys()):
+        chunks = source_map[src]
+        stats = _upsert_openviking_layers(layered_store, src, chunks)
+        rebuilt.append(
+            {
+                "source": src,
+                "chunks": len(chunks),
+                "l0": int(stats.get("l0", 0)),
+                "l1": int(stats.get("l1", 0)),
+            }
+        )
+    return {"sources": len(source_map), "rebuilt": rebuilt, "stats": layered_store.stats()}
+
+
+def _collect_openviking_context(
+    query: str,
+    query_embedding: list[float],
+    user_store: VectorStore | None,
+    openviking_store: OpenVikingStore | None,
+) -> tuple[list[tuple[float, RetrievedContext]], dict[str, Any]]:
+    if not OPENVIKING_ENABLED or openviking_store is None:
+        return [], {"enabled": False}
+    l0_scored = openviking_store.search_layer(
+        query=query,
+        query_embedding=query_embedding,
+        layer="L0",
+        k=OPENVIKING_L0_TOPK,
+    )
+    if not l0_scored:
+        return [], {"enabled": True, "l0_hits": 0}
+    candidate_sources: list[str] = []
+    for _, item in l0_scored:
+        if item.source not in candidate_sources:
+            candidate_sources.append(item.source)
+
+    l1_scored = openviking_store.search_layer(
+        query=query,
+        query_embedding=query_embedding,
+        layer="L1",
+        k=OPENVIKING_L1_TOPK,
+        sources=candidate_sources,
+    )
+    if not l1_scored:
+        l1_scored = openviking_store.search_layer(
+            query=query,
+            query_embedding=query_embedding,
+            layer="L1",
+            k=OPENVIKING_L1_TOPK,
+        )
+    l2_scored = _top_chunks_from_sources(user_store, query_embedding, candidate_sources, k=OPENVIKING_L2_TOPK)
+
+    merged: list[tuple[float, RetrievedContext]] = []
+    for score, item in l1_scored:
+        title_prefix = f"{item.title}\n" if item.title else ""
+        merged.append(
+            (
+                float(score) + 0.08,
+                RetrievedContext(
+                    id=item.id,
+                    source=item.source,
+                    text=f"[L1概览]\n{title_prefix}{item.text}".strip(),
+                    layer="L1",
+                    title=item.title,
+                    refs=item.refs,
+                ),
+            )
+        )
+    for score, chunk in l2_scored:
+        merged.append(
+            (
+                float(score),
+                RetrievedContext(
+                    id=str(getattr(chunk, "id", "")),
+                    source=str(getattr(chunk, "source", "")),
+                    text=str(getattr(chunk, "text", "")),
+                    layer="L2",
+                ),
+            )
+        )
+
+    merged.sort(key=lambda x: x[0], reverse=True)
+    return merged[: max(OPENVIKING_L1_TOPK + OPENVIKING_L2_TOPK, 4)], {
+        "enabled": True,
+        "l0_hits": len(l0_scored),
+        "l1_hits": len(l1_scored),
+        "l2_hits": len(l2_scored),
+        "candidate_sources": candidate_sources,
+    }
 
 
 def _add_timeline_events(session_id: str, source: str, text: str, *, user_id: str | None = None) -> tuple[int, bool]:
@@ -1117,6 +1450,11 @@ def health() -> dict[str, Any]:
         "audit_log_path": str(AUDIT_LOG_PATH.relative_to(ROOT)),
         "models": {"hidden": True},
         "timeline_encoder": TIMELINE_ENCODER,
+        "openviking_enabled": OPENVIKING_ENABLED,
+        "openviking_use_llm": OPENVIKING_USE_LLM,
+        "openviking_l0_topk": OPENVIKING_L0_TOPK,
+        "openviking_l1_topk": OPENVIKING_L1_TOPK,
+        "openviking_l2_topk": OPENVIKING_L2_TOPK,
         "local_literature_agent_enabled": ENABLE_LOCAL_LITERATURE_AGENT,
         "local_literature_records": len(literature_index),
         "local_literature_last_refresh_at": int(literature_last_refresh_at) if literature_last_refresh_at else None,
@@ -1172,8 +1510,11 @@ def auth_me(request: Request) -> JSONResponse:
     user_dir = user_manager.get_user_data_dir(user_id)
     timeline_path = user_dir / "timeline_events.json"
     vector_path = user_dir / "user_vector_store.json"
+    openviking_path = user_dir / "openviking_layers.json"
     timeline_count = 0
     chunk_count = 0
+    openviking_l0 = 0
+    openviking_l1 = 0
     upload_sources: list[str] = []
     if timeline_path.exists():
         try:
@@ -1193,12 +1534,32 @@ def auth_me(request: Request) -> JSONResponse:
             upload_sources = sorted(sources_set)
         except Exception:
             pass
+    if openviking_path.exists():
+        try:
+            layered = json.loads(openviking_path.read_text(encoding="utf-8"))
+            for item in layered:
+                layer = str(item.get("layer", "")).upper()
+                if layer == "L0":
+                    openviking_l0 += 1
+                elif layer == "L1":
+                    openviking_l1 += 1
+        except Exception:
+            pass
+    if openviking_l0 == 0 and openviking_l1 == 0 and OPENVIKING_ENABLED:
+        try:
+            stats = _get_user_openviking_store(user_id).stats()
+            openviking_l0 = int(stats.get("l0", 0) or 0)
+            openviking_l1 = int(stats.get("l1", 0) or 0)
+        except Exception:
+            pass
     return JSONResponse({
         "ok": True,
         "user": user_manager.get_user_info(user),
         "data_stats": {
             "timeline_events": timeline_count,
             "vector_chunks": chunk_count,
+            "openviking_l0": openviking_l0,
+            "openviking_l1": openviking_l1,
             "upload_sources": upload_sources,
         },
     })
@@ -1212,6 +1573,7 @@ def user_delete_data(request: Request) -> JSONResponse:
     result = user_manager.delete_user_data(user_id)
     user_stores.pop(user_id, None)
     user_timeline_events.pop(user_id, None)
+    user_openviking_stores.pop(user_id, None)
     audit_logger.log(
         event_type="user_data_deleted",
         session_id=user_id,
@@ -1231,6 +1593,7 @@ def user_delete_account(request: Request) -> JSONResponse:
     user_manager.delete_user_data(user_id)
     user_stores.pop(user_id, None)
     user_timeline_events.pop(user_id, None)
+    user_openviking_stores.pop(user_id, None)
     
     # Delete the account record
     ok = user_manager.delete_account(user.username)
@@ -1262,12 +1625,16 @@ def user_delete_upload(request: Request, source: str = "") -> JSONResponse:
     user_timeline_events[user_id] = events
     _save_user_timeline(user_id)
     removed_events = original_events - len(events)
+    layered_store = _get_or_create_user_openviking_store(user_id)
+    removed_layers = layered_store.remove_source(full_source)
     return JSONResponse({
         "ok": True,
         "removed_chunks": removed_chunks,
         "removed_events": removed_events,
+        "removed_openviking_layers": removed_layers,
         "remaining_chunks": len(store.chunks),
         "remaining_events": len(events),
+        "remaining_openviking_layers": layered_store.stats().get("total", 0),
     })
 
 
@@ -1287,6 +1654,12 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
         active_store = _get_or_create_user_store(auth_user_id)
     else:
         active_store = _get_or_create_session_store(session_id)
+    active_openviking_store: OpenVikingStore | None = None
+    if OPENVIKING_ENABLED:
+        if auth_user_id:
+            active_openviking_store = _get_or_create_user_openviking_store(auth_user_id)
+        else:
+            active_openviking_store = _get_or_create_session_openviking_store(session_id)
 
     results = []
     has_error = False
@@ -1313,15 +1686,20 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
             if is_image and ENABLE_UPLOAD_DEID:
                 image_redaction = _build_image_redaction_result(file_bytes, mime_type=input_mime)
             chunks = split_text(text)
+            source_key = f"session/{file_name}"
             added = active_store.add_texts(
-                source=f"session/{file_name}",
+                source=source_key,
                 texts=chunks,
                 embed_fn=lambda t: embed_text(client, EMBEDDING_MODEL, t),
             )
             extracted_events, has_known_date = _add_timeline_events(
-                session_id, source=f"session/{file_name}", text=text,
+                session_id, source=source_key, text=text,
                 user_id=auth_user_id,
             )
+            layered_stats = {"l0": 0, "l1": 0}
+            if active_openviking_store is not None:
+                source_chunks = [c for c in active_store.chunks if c.source == source_key]
+                layered_stats = _upsert_openviking_layers(active_openviking_store, source_key, source_chunks)
             date_warning = ""
             timeline_date = str((extract_meta or {}).get("timeline_date", "")).strip()
             timeline_date_source = str((extract_meta or {}).get("timeline_date_source", "")).strip()
@@ -1334,6 +1712,8 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
                     "file": file_name,
                     "chunks": added,
                     "timeline_events": extracted_events,
+                    "openviking_l0": layered_stats.get("l0", 0),
+                    "openviking_l1": layered_stats.get("l1", 0),
                     "date_detected": has_known_date,
                     "date_warning": date_warning,
                     "timeline_date": timeline_date,
@@ -1358,6 +1738,8 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
                     "redaction_preview": redaction_preview,
                     "image_redaction": image_redaction,
                     "timeline_events": extracted_events,
+                    "openviking_l0": layered_stats.get("l0", 0),
+                    "openviking_l1": layered_stats.get("l1", 0),
                     "date_detected": has_known_date,
                     "date_warning": date_warning,
                     "timeline_date": timeline_date,
@@ -1377,12 +1759,14 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
             results.append({"file": file_name, "ok": False, "error": str(exc)})
     status_code = 207 if has_error else 200
     timeline_events = _get_timeline_events(session_id, user_id=auth_user_id)
+    openviking_total = active_openviking_store.stats().get("total", 0) if active_openviking_store else 0
     return JSONResponse(
         {
             "ok": not has_error,
             "results": results,
             "session_chunks": len(active_store.chunks),
             "timeline_event_count": len(timeline_events),
+            "openviking_items": openviking_total,
             "persistent": auth_user_id is not None,
         },
         status_code=status_code,
@@ -1509,6 +1893,58 @@ def import_guidelines(payload: ImportGuidelinesRequest, request: Request) -> JSO
     )
 
 
+@app.get("/api/internal/guidelines")
+def list_guidelines(request: Request) -> JSONResponse:
+    _ensure_internal_access(request)
+    if not GUIDELINES_DIR.exists():
+        return JSONResponse({"files": []})
+    files = []
+    for f in GUIDELINES_DIR.iterdir():
+        if f.is_file() and not f.name.startswith("."):
+            stats = f.stat()
+            files.append({
+                "name": f.name,
+                "size": stats.st_size,
+                "modified": stats.st_mtime
+            })
+    # Sort: updated recently first
+    files.sort(key=lambda x: x["modified"], reverse=True)
+    return JSONResponse({"files": files})
+
+
+@app.post("/api/internal/guidelines")
+async def upload_guideline(request: Request, file: UploadFile = File(...)) -> JSONResponse:
+    _ensure_internal_access(request)
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+    
+    filename = Path(file.filename).name
+    # Simple sanitization
+    filename = filename.replace("/", "_").replace("\\", "_")
+    target_path = GUIDELINES_DIR / filename
+    
+    GUIDELINES_DIR.mkdir(parents=True, exist_ok=True)
+    
+    with target_path.open("wb") as buffer:
+        import shutil
+        shutil.copyfileobj(file.file, buffer)
+        
+    return JSONResponse({"ok": True, "name": filename, "msg": "上传成功"})
+
+
+@app.delete("/api/internal/guidelines")
+def delete_guideline(request: Request, filename: str) -> JSONResponse:
+    _ensure_internal_access(request)
+    # Security check to prevent directory traversal
+    safe_name = Path(filename).name
+    target_path = GUIDELINES_DIR / safe_name
+    
+    if target_path.exists() and target_path.is_file():
+        target_path.unlink()
+        return JSONResponse({"ok": True, "msg": "已删除"})
+    return JSONResponse({"ok": False, "msg": "文件不存在"}, status_code=404)
+
+
 @app.post("/api/chat")
 def chat(payload: ChatRequest, request: Request) -> JSONResponse:
     if not payload.message.strip():
@@ -1522,19 +1958,34 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
     def _embed_with_cache(text: str) -> list[float]:
         return _global_embed(text)
 
-    # Retrieve from both internal guidelines and user/session data.
+    # Retrieve from internal guidelines + user context (OpenViking preferred).
     _INTERNAL_BOOST = 0.03  # slight boost so guidelines win ties
     internal_scored = internal_store.similarity_search_with_scores(
         payload.message,
         embed_fn=cached_embed,
         k=4,
     )
-    session_scored: list[tuple[float, Any]] = []
+    internal_context_scored: list[tuple[float, RetrievedContext]] = [
+        (
+            float(score),
+            RetrievedContext(
+                id=str(chunk.id),
+                source=str(chunk.source),
+                text=str(chunk.text),
+                layer="L2",
+            ),
+        )
+        for score, chunk in internal_scored
+    ]
+    session_scored: list[tuple[float, RetrievedContext]] = []
+    openviking_trace: dict[str, Any] = {"enabled": False}
     # Use persistent user store if authenticated
     if auth_user_id:
         user_store = _get_user_store(auth_user_id)
+        openviking_store = _get_user_openviking_store(auth_user_id) if OPENVIKING_ENABLED else None
     else:
         user_store = _get_session_store(session_id)
+        openviking_store = _get_session_openviking_store(session_id) if OPENVIKING_ENABLED else None
     timeline_events = _get_timeline_events(session_id, user_id=auth_user_id)
     reasoning_mode, reasoning_meta = _assess_reasoning_mode(
         payload.message,
@@ -1544,15 +1995,53 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
     timeline_state = encode_timeline_state(timeline_events, encoder=TIMELINE_ENCODER)
     retrieval_hint = build_retrieval_hint(payload.message, timeline_events, state=timeline_state)
     timeline_summary = build_timeline_summary(timeline_events, max_items=8)
-    if user_store is not None:
-        session_scored = user_store.similarity_search_with_scores(
+
+    if user_store is not None and OPENVIKING_ENABLED and openviking_store is not None:
+        layered_total = int(openviking_store.stats().get("total", 0) or 0)
+        if layered_total == 0 and len(getattr(user_store, "chunks", [])) > 0:
+            auto_rebuild = _rebuild_openviking_from_vector_store(
+                openviking_store,
+                user_store,
+                reset=False,
+            )
+            openviking_trace["auto_rebuild"] = {
+                "sources": int(auto_rebuild.get("sources", 0) or 0),
+                "stats": auto_rebuild.get("stats", {}),
+            }
+
+    # Priority path: L0 -> L1 -> optional L2 drill-down.
+    if user_store is not None and OPENVIKING_ENABLED and openviking_store is not None:
+        session_scored, layered_trace = _collect_openviking_context(
+            query=payload.message,
+            query_embedding=query_embedding,
+            user_store=user_store,
+            openviking_store=openviking_store,
+        )
+        openviking_trace.update(layered_trace)
+
+    # Fallback: flat L2 retrieval when layered memory isn't available yet.
+    if user_store is not None and not session_scored:
+        flat_scored = user_store.similarity_search_with_scores(
             payload.message,
             embed_fn=cached_embed,
             k=4,
         )
+        session_scored = [
+            (
+                float(score),
+                RetrievedContext(
+                    id=str(chunk.id),
+                    source=str(chunk.source),
+                    text=str(chunk.text),
+                    layer="L2",
+                ),
+            )
+            for score, chunk in flat_scored
+        ]
+        openviking_trace.setdefault("fallback_flat_l2", True)
 
     # Merge by similarity score (internal chunks get a small boost at ties).
-    _merged = [(score + _INTERNAL_BOOST, chunk) for score, chunk in internal_scored] + list(session_scored)
+    _merged = [(score + _INTERNAL_BOOST, chunk) for score, chunk in internal_context_scored] + list(session_scored)
     _merged.sort(key=lambda item: item[0], reverse=True)
     all_scored = _merged[:6]
     context_chunks = [item[1] for item in all_scored]
@@ -1607,35 +2096,41 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
         {
             "role": "system",
             "content": (
-                "你是一名具有临床思维与沟通训练的医生型助手。你的目标是：在不夸大、不武断的前提下，"
-                "用专业但易懂的方式帮助用户理解症状与下一步行动（分诊/检查/用药/护理），并在必要时明确提醒就医紧急程度。\n\n"
-                "【总原则】\n"
-                "- 先安全：优先识别急症/红旗信号；不确定时用“风险最小化”策略建议就医。\n"
-                "- 像医生说话：自然、克制、具体；少用模板化标题，避免每次都输出同一套结构。\n"
-                "- 先问对问题再下结论：若信息不足，优先提出 3-6 个高收益追问；不要一次性抛 20 个问题。\n"
-                "- 给行动建议：每次回答至少给出“下一步怎么做”，包括观察点、何时复诊/急诊、可行的居家处理。\n"
-                "- 避免装懂：不要编造药物剂量、指南结论、检验结果；对于不确定处要明确说明不确定原因与需要补充的信息。\n\n"
-                "【自适应呈现（关键）】\n"
-                "你必须先在心里判断用户问题属于哪一类，并选择最合适的表达方式（只选一种为主）：\n"
-                "A. 快速分诊/风险提示（短、直接、行动导向）\n"
-                "B. 门诊式解释（先结论后理由，穿插追问）\n"
-                "C. 科普型说明（类比+机制解释，少量要点列举）\n"
-                "D. 复杂病程总结（仅在用户提供多段病史/检查结果时才使用结构化病程时间线）\n\n"
-                "呈现约束：\n"
-                "- 禁止固定模板复用，不要每次都用同一标题序列。\n"
-                "- 只在复杂/多信息时使用分点或小标题；否则用自然段表达。\n"
-                "- 允许局部结构化：如注意事项/红旗信号/用药提醒可用项目符号，其余优先自然叙述。\n\n"
+                "你是一位经验丰富、温和且严谨的肿瘤科主治医师。你的对话对象是焦虑的患者或家属。\n"
+                "你的核心任务：像在门诊面对面交流一样，用“我”的视角解读病历，给出有温度、有依据的专业建议。\n\n"
+                "【沟通风格：医生视角 + 自然对话】\n"
+                "- **第一人称（强制）**：必须时刻使用“我看了您的...”、“我认为...”、“我建议...”。严禁使用“该患者”、“根据结果显示”这种第三方冷漠语体。\n"
+                "- **拒绝机器味**：严禁上来就罗列“一、xxx；二、xxx”。请像真人聊天一样，用自然的连接词（“首先...”、“从目前的指标看...”、“至于您担心的...”）来组织语言。\n"
+                "- **共情与安抚**：在抛出异常指标或坏消息前，必须先有一句缓冲（如“这个指标确实偏高，但先别急，我们需要结合影像看...”）。\n\n"
+                "【版面美学：清晰大方】\n"
+                "虽然语气是口语化的，但排版必须清晰易读。请巧妙利用 Markdown：\n"
+                "- **小标题引导**：用 `### 关于报告解读`、`### 下一步建议` 等小标题区隔话题，不要挤成一团。\n"
+                "- **重点加粗**：关键的药物名、检查项、异常值请用 **粗体** 高亮，方便患者一眼抓重点。\n"
+                "- **适度列表**：列举多个检查项目或注意事项时，请使用无序列表（- ），保持整洁。\n\n"
+                "【临床逻辑：严谨闭环】\n"
+                "- **先核实，后建议**：若病历信息孤立（如只有一张化验单），必须先询问前情（“这是术后复查还是初诊？之前做过什么治疗？”），不要盲目建议做已完成的检查。\n"
+                "- **条件式建议**：尽量说“若您近期未查...建议...”，而不是生硬的“请去做...”。\n\n"
+                "【范例参考（请模仿这种语感）】\n"
+                "❌ 错误：\n"
+                "一、诊断结果：CA19-9升高。\n"
+                "二、风险评估：高风险。\n"
+                "三、建议：进行PET-CT检查。\n\n"
+                "✅ 正确：\n"
+                "### 📋 关于您的血液报告\n"
+                "我仔细看了您上传的化验单，**CA19-9** 这一项指标确实引起了我的注意，它比正常值高出了一些。这通常提示我们需要警惕消化道来源的问题，但也可能是炎症引起的波动。\n\n"
+                "### 💡 我的建议\n"
+                "考虑到您之前已经做过切除手术，我倾向于认为这需要进一步排查。**如果您近期没有做过全腹增强CT**，我强烈建议您安排一次，以排除复发的可能..."
                 "【临床推理与证据约束（当接入资料时启用）】\n"
                 "- 先形成可检验结论（claims），再检查每条是否有证据支撑；无法支撑的改为不确定表述或删除。\n"
                 "- 若用户要求依据/来源或你引用外部资料，仅提供 1-3 条关键依据，避免论文化表达。\n\n"
                 "- 简单问题优先直接给结论与行动建议，不要强行扩展成长文。\n"
                 "- 外部学术文献仅在必要时使用；若本轮未使用外部文献，不要输出[文献#]。\n\n"
-                "【病程时间线与风险状态（仅在需要时）】\n"
-                "- 若用户提供多时点信息（第几天、用药后、化疗周期），可抽取 3-6 个关键事件形成简短时间线。\n"
-                "- risk_level 仅用于分诊强度：low/moderate/high/urgent，不伪装成定量评分。\n"
-                "- 时间线不是必选输出，除非它能显著减少误解或用户明确要求。\n\n"
+                "【身份披露与术语约束（严格执行）】\n"
+                "- 禁止使用“Mamba”、“Transformer”、“Score”、“算法得分”、“模型预测值”等底层技术术语。\n"
+                "- 禁止输出小数点后超过2位的数值评分（如 4.0534），改用“高风险”、“中等风险”等定性描述。\n"
+                "- 若系统提示 risk_level=high，必须在回答结尾增加一句基于循证医学的安抚或积极引导（如“规范治疗可有效控制...”）。\n\n"
                 "【输出要求】\n"
-                "- 语气：专业、稳重、同理但不夸张。\n"
+                "- 语气：专业、稳重、同理但不夸张。像一位经验丰富的临床医生在与患者沟通。\n"
                 "- 长度：优先短而有用；复杂问题才展开。\n"
                 "- 若涉及可能危及生命的情况，必须明确写出“建议立刻急诊/拨打当地急救电话”的触发条件。\n\n"
                 "【身份披露约束】\n"
@@ -1684,7 +2179,9 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
     answer = _sanitize_model_disclosure(resp.choices[0].message.content or "暂无回复")
     ranked_sources = []
     for rank, (score, chunk) in enumerate(all_scored, start=1):
-        source_type = "internal" if chunk.source.startswith("internal/") else "session"
+        source_type = "internal" if str(chunk.source).startswith("internal/") else "session"
+        layer = str(getattr(chunk, "layer", "L2"))
+        evidence = _build_evidence_snippet(str(chunk.text), payload.message)
         item = {
             "rank": rank,
             "score": round(float(score), 4),
@@ -1692,11 +2189,13 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
             "source": _format_source(chunk.source),
             "source_raw": chunk.source,
             "type": source_type,
+            "layer": layer,
+            "title": str(getattr(chunk, "title", "") or ""),
             "page": _extract_page_from_text(chunk.text),
             "section": _extract_section_from_text(chunk.text),
             "text_length": len(chunk.text),
             "preview": chunk.text[:220],
-            "evidence": chunk.text[:500],
+            "evidence": evidence,
         }
         ranked_sources.append(item)
 
@@ -1865,6 +2364,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
             "reasoning_mode": reasoning_mode,
             "reasoning_meta": reasoning_meta,
             "timeline_events": len(timeline_events),
+            "openviking_trace": openviking_trace,
             "evidence_coverage": evidence_guard.get("coverage", 0),
             "literature_coverage": literature_guard.get("coverage", 0),
             "rewrite_triggered": rewrite_triggered,
@@ -1885,6 +2385,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
             "external_literature_enabled": use_external_literature,
             "reasoning_mode": reasoning_mode,
             "reasoning_meta": reasoning_meta,
+            "openviking_trace": openviking_trace,
             "literature_guard": literature_guard,
             "auto_rewrite_applied": auto_rewrite_applied,
             "rewrite_triggered": rewrite_triggered,
@@ -1899,6 +2400,12 @@ def session_timeline(request: Request) -> JSONResponse:
     auth_user, auth_user_id = _get_auth_user(request)
     session_id = _get_session_id(request)
     events = _get_timeline_events(session_id, user_id=auth_user_id)
+    layered_store = (
+        _get_user_openviking_store(auth_user_id)
+        if auth_user_id
+        else _get_session_openviking_store(session_id)
+    )
+    layered_stats = layered_store.stats() if layered_store else {"total": 0, "l0": 0, "l1": 0, "sources": 0}
     expiry = _get_session_expiry(session_id, user_id=auth_user_id)
     return JSONResponse(
         {
@@ -1908,8 +2415,62 @@ def session_timeline(request: Request) -> JSONResponse:
             "encoder": TIMELINE_ENCODER,
             "summary": build_timeline_summary(events, max_items=10),
             "events": events_to_dict(events),
+            "openviking_stats": layered_stats,
             "persistent": auth_user_id is not None,
             **expiry,
+        }
+    )
+
+
+@app.get("/api/openviking/stats")
+def openviking_stats(request: Request) -> JSONResponse:
+    auth_user, auth_user_id = _get_auth_user(request)
+    session_id = _get_session_id(request)
+    layered_store = (
+        _get_user_openviking_store(auth_user_id)
+        if auth_user_id
+        else _get_session_openviking_store(session_id)
+    )
+    vector_store = _get_user_store(auth_user_id) if auth_user_id else _get_session_store(session_id)
+    return JSONResponse(
+        {
+            "ok": True,
+            "session_id": auth_user_id or session_id,
+            "enabled": OPENVIKING_ENABLED,
+            "stats": layered_store.stats() if layered_store else {"total": 0, "l0": 0, "l1": 0, "sources": 0},
+            "vector_chunks": len(vector_store.chunks) if vector_store is not None else 0,
+            "persistent": auth_user_id is not None,
+        }
+    )
+
+
+@app.post("/api/openviking/rebuild")
+def openviking_rebuild(request: Request, reset: bool = True) -> JSONResponse:
+    auth_user, auth_user_id = _get_auth_user(request)
+    session_id = _get_session_id(request)
+    if auth_user_id:
+        vector_store = _get_user_store(auth_user_id)
+        layered_store = _get_or_create_user_openviking_store(auth_user_id)
+    else:
+        vector_store = _get_session_store(session_id)
+        layered_store = _get_or_create_session_openviking_store(session_id)
+    if vector_store is None:
+        return JSONResponse({"ok": False, "error": "no_active_store"}, status_code=400)
+
+    rebuild = _rebuild_openviking_from_vector_store(layered_store, vector_store, reset=reset)
+    out_stats = rebuild.get("stats", layered_store.stats())
+    audit_logger.log(
+        event_type="openviking_rebuild",
+        session_id=auth_user_id or session_id,
+        details={"sources": int(rebuild.get("sources", 0) or 0), "stats": out_stats, "reset": bool(reset)},
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "sources": int(rebuild.get("sources", 0) or 0),
+            "rebuilt": rebuild.get("rebuilt", []),
+            "stats": out_stats,
+            "persistent": auth_user_id is not None,
         }
     )
 
@@ -1974,3 +2535,11 @@ def audit_recent(limit: int = 50) -> JSONResponse:
 @app.get("/api/audit/ttl-proof")
 def audit_ttl_proof(session_id: str | None = None) -> JSONResponse:
     return JSONResponse({"items": audit_logger.ttl_proof(session_id=session_id)})
+
+
+@app.get("/admin")
+def admin_page() -> FileResponse:
+    admin_html = STATIC_DIR / "admin.html"
+    if not admin_html.exists():
+        raise HTTPException(status_code=404, detail="Admin console not found")
+    return FileResponse(admin_html)

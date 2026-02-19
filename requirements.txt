@@ -1,11 +1,12 @@
-fastapi==0.116.1
-uvicorn[standard]==0.35.0
+fastapi==0.129.0
+uvicorn[standard]==0.41.0
 python-multipart==0.0.20
 python-dotenv==1.1.1
 openai==1.99.9
 pypdf==5.9.0
 pymupdf==1.26.4
-numpy==2.2.6
+numpy==1.26.4
 Pillow==11.3.0
 paddleocr==2.8.1
 PyJWT==2.11.0
+openviking==0.1.17

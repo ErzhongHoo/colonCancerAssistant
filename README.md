@@ -112,6 +112,9 @@ curl -X POST "http://127.0.0.1:8000/api/internal/import-guidelines" \
 - `AUTO_EVIDENCE_REWRITE=true`：低充分度时自动二次改写答案
 - `EVIDENCE_REWRITE_MIN_COVERAGE=0.75`：触发改写的最低证据覆盖率阈值
 - `EVIDENCE_REWRITE_MAX_UNSUPPORTED=1`：触发改写的最大不支持结论阈值
+- `OPENVIKING_NATIVE_ENABLED=true`：启用官方 OpenViking SDK 作为分层检索主通道（异常时自动回退本地实现）
+- `OPENVIKING_NATIVE_STORAGE_PATH=./data/openviking_native`：官方 OpenViking 本地存储目录
+- `OPENVIKING_NATIVE_AGFS_PORT=1833`：官方 OpenViking 内嵌 AGFS 端口（多实例部署时需错开）
 - `JWT_SECRET=<your_secret>`：JWT 签名密钥（详见下方认证章节）
 - `JWT_EXPIRE_SECONDS=604800`：JWT 令牌过期时间（默认 7 天）
 
