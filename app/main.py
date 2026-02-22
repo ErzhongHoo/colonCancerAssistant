@@ -7,10 +7,10 @@ import json
 import mimetypes
 import os
 import re
+import threading
 import time
 import uuid
-import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,6 @@ from app.auth import UserManager
 from pypdf import PdfReader
 
 from app.audit import AuditLogger
-from app.evidence_guard import verify_answer_with_evidence
 from app.literature_agent import (
     LITERATURE_STATE_PATH,
     load_index,
@@ -32,9 +31,7 @@ from app.literature_agent import (
     search_from_local_store,
 )
 from app.literature_search import (
-    literature_to_context,
     search_literature,
-    verify_literature_citations,
 )
 from app.llm import (
     build_client,
@@ -63,7 +60,7 @@ from app.timeline import (
     extract_events_with_llm,
     merge_events,
 )
-from app.vector_store import VectorStore, build_internal_store, build_session_store, build_user_store, get_vector_backend
+from app.vector_store import VectorStore, build_session_store, build_user_store, get_vector_backend
 
 try:
     import fitz  # type: ignore
@@ -75,7 +72,7 @@ load_dotenv()
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = ROOT / "web"
 GUIDELINES_DIR = ROOT / "data" / "guidelines"
-INTERNAL_VECTOR_DB = ROOT / "data" / "internal_vector_store.json"
+INTERNAL_OPENVIKING_DB = ROOT / "data" / "openviking_internal_layers.json"
 GUIDELINES_VERSION_PATH = ROOT / "data" / "guidelines_versions.json"
 AUDIT_LOG_PATH = ROOT / "data" / "audit_log.jsonl"
 USER_DB_PATH = ROOT / "data" / "users.db"
@@ -138,10 +135,16 @@ OPENVIKING_L1_TOPK = max(int(os.getenv("OPENVIKING_L1_TOPK", "4")), 1)
 OPENVIKING_L2_TOPK = max(int(os.getenv("OPENVIKING_L2_TOPK", "2")), 0)
 OPENVIKING_SUMMARY_INPUT_CHARS = max(int(os.getenv("OPENVIKING_SUMMARY_INPUT_CHARS", "10000")), 1200)
 OPENVIKING_EVIDENCE_SNIPPET_MAX_CHARS = max(int(os.getenv("OPENVIKING_EVIDENCE_SNIPPET_MAX_CHARS", "700")), 240)
+OPENVIKING_RAG_L1_BUDGET = max(int(os.getenv("OPENVIKING_RAG_L1_BUDGET", "6")), 1)
+OPENVIKING_RAG_L2_BUDGET = max(int(os.getenv("OPENVIKING_RAG_L2_BUDGET", "2")), 0)
+OPENVIKING_RAG_DEEP_L1_BUDGET = max(int(os.getenv("OPENVIKING_RAG_DEEP_L1_BUDGET", "10")), OPENVIKING_RAG_L1_BUDGET)
+OPENVIKING_RAG_DEEP_L2_BUDGET = max(int(os.getenv("OPENVIKING_RAG_DEEP_L2_BUDGET", "4")), OPENVIKING_RAG_L2_BUDGET)
+CHAT_COMPLETION_TIMEOUT_SECONDS = max(float(os.getenv("CHAT_COMPLETION_TIMEOUT_SECONDS", "120")), 5.0)
+CHAT_PROGRESS_TTL_SECONDS = max(int(os.getenv("CHAT_PROGRESS_TTL_SECONDS", "1800")), 60)
 
 app = FastAPI(title="Colon Cancer RAG MVP")
 client = build_client()
-internal_store = build_internal_store(INTERNAL_VECTOR_DB)
+internal_openviking_store = OpenVikingStore(INTERNAL_OPENVIKING_DB, namespace="internal-guidelines")
 audit_logger = AuditLogger(AUDIT_LOG_PATH)
 user_manager = UserManager(USER_DB_PATH, USER_DATA_ROOT)
 
@@ -208,6 +211,21 @@ class RetrievedContext:
     refs: list[str] | None = None
 
 
+@dataclass
+class ChatProgressState:
+    request_id: str
+    session_id: str
+    step: str
+    label: str
+    status: str
+    done: bool
+    started_at: float
+    updated_at: float
+    elapsed_seconds: int = 0
+    error: str = ""
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
 session_stores: dict[str, SessionStoreState] = {}
 session_timeline_events: dict[str, list[ClinicalEvent]] = {}
 # Per-user persistent stores (lazy loaded)
@@ -218,6 +236,21 @@ user_openviking_stores: dict[str, OpenVikingStore] = {}
 literature_index: dict[str, dict[str, object]] = load_index()
 literature_last_refresh_at = 0.0
 literature_last_refresh_result: dict[str, Any] = {}
+chat_progress_states: dict[str, ChatProgressState] = {}
+chat_progress_lock = threading.Lock()
+
+CHAT_PROGRESS_STEPS: list[tuple[str, str]] = [
+    ("accepted", "请求已接收"),
+    ("analyzing_question", "解析问题"),
+    ("retrieving_evidence", "检索证据"),
+    ("building_context", "组装证据"),
+    ("generating_answer", "生成答案"),
+    ("validating_evidence", "校验证据"),
+    ("completed", "完成"),
+    ("failed", "失败"),
+]
+CHAT_PROGRESS_LABELS: dict[str, str] = {key: label for key, label in CHAT_PROGRESS_STEPS}
+CHAT_PROGRESS_INDEX: dict[str, int] = {key: idx for idx, (key, _) in enumerate(CHAT_PROGRESS_STEPS)}
 
 if literature_index and LITERATURE_STATE_PATH.exists():
     try:
@@ -274,6 +307,112 @@ def _refresh_local_literature_if_needed(force: bool = False, max_results: int | 
             details={"error": str(exc), "topic_query": LITERATURE_AGENT_TOPIC_QUERY, "force": force},
         )
         return err
+
+
+def _chat_progress_step_label(step: str) -> str:
+    return CHAT_PROGRESS_LABELS.get(step, step)
+
+
+def _cleanup_chat_progress(now: float | None = None) -> None:
+    current = now if now is not None else time.time()
+    expired: list[str] = []
+    with chat_progress_lock:
+        for request_id, state in chat_progress_states.items():
+            if current - state.updated_at > CHAT_PROGRESS_TTL_SECONDS:
+                expired.append(request_id)
+        for request_id in expired:
+            chat_progress_states.pop(request_id, None)
+
+
+def _chat_progress_begin(request_id: str, session_id: str) -> None:
+    now = time.time()
+    state = ChatProgressState(
+        request_id=request_id,
+        session_id=session_id,
+        step="accepted",
+        label=_chat_progress_step_label("accepted"),
+        status="running",
+        done=False,
+        started_at=now,
+        updated_at=now,
+        elapsed_seconds=0,
+        error="",
+        meta={},
+    )
+    with chat_progress_lock:
+        chat_progress_states[request_id] = state
+    _cleanup_chat_progress(now)
+
+
+def _chat_progress_update(request_id: str, step: str, meta: dict[str, Any] | None = None) -> None:
+    now = time.time()
+    with chat_progress_lock:
+        state = chat_progress_states.get(request_id)
+        if state is None:
+            return
+        state.step = step
+        state.label = _chat_progress_step_label(step)
+        state.status = "running"
+        state.done = False
+        state.updated_at = now
+        state.elapsed_seconds = max(int(now - state.started_at), 0)
+        if meta:
+            state.meta.update(meta)
+
+
+def _chat_progress_complete(request_id: str, meta: dict[str, Any] | None = None) -> None:
+    now = time.time()
+    with chat_progress_lock:
+        state = chat_progress_states.get(request_id)
+        if state is None:
+            return
+        state.step = "completed"
+        state.label = _chat_progress_step_label("completed")
+        state.status = "completed"
+        state.done = True
+        state.updated_at = now
+        state.elapsed_seconds = max(int(now - state.started_at), 0)
+        state.error = ""
+        if meta:
+            state.meta.update(meta)
+
+
+def _chat_progress_fail(request_id: str, error: str) -> None:
+    now = time.time()
+    with chat_progress_lock:
+        state = chat_progress_states.get(request_id)
+        if state is None:
+            return
+        state.step = "failed"
+        state.label = _chat_progress_step_label("failed")
+        state.status = "failed"
+        state.done = True
+        state.updated_at = now
+        state.elapsed_seconds = max(int(now - state.started_at), 0)
+        state.error = str(error or "unknown_error")[:300]
+
+
+def _chat_progress_payload(request_id: str) -> dict[str, Any] | None:
+    _cleanup_chat_progress()
+    with chat_progress_lock:
+        state = chat_progress_states.get(request_id)
+        if state is None:
+            return None
+        return {
+            "request_id": state.request_id,
+            "session_id": state.session_id,
+            "step": state.step,
+            "label": state.label,
+            "status": state.status,
+            "done": state.done,
+            "step_index": CHAT_PROGRESS_INDEX.get(state.step, -1),
+            "elapsed_seconds": state.elapsed_seconds,
+            "updated_at": int(state.updated_at),
+            "started_at": int(state.started_at),
+            "error": state.error,
+            "meta": dict(state.meta),
+            "steps": [{"key": key, "label": label} for key, label in CHAT_PROGRESS_STEPS],
+        }
 
 
 def _expire_session(session_id: str, reason: str = "ttl") -> bool:
@@ -531,6 +670,7 @@ def _generate_openviking_layers(source: str, chunks: list[Any]) -> tuple[str, li
                 },
             ],
             temperature=0.0,
+            timeout=CHAT_COMPLETION_TIMEOUT_SECONDS,
         )
         raw = resp.choices[0].message.content or ""
         parsed = json.loads(_extract_json_object(raw))
@@ -559,39 +699,14 @@ def _upsert_openviking_layers(store: OpenVikingStore, source: str, chunks: list[
     if not OPENVIKING_ENABLED:
         return {"l0": 0, "l1": 0}
     l0_text, l1_items = _generate_openviking_layers(source, chunks)
+    l2_texts = [str(getattr(c, "text", "") or "").strip() for c in chunks]
     return store.upsert_source_layers(
         source=source,
         l0_text=l0_text,
         l1_items=l1_items,
         embed_fn=_global_embed,
+        l2_texts=[x for x in l2_texts if x],
     )
-
-
-def _top_chunks_from_sources(
-    vector_store: VectorStore | None,
-    query_embedding: list[float],
-    sources: list[str],
-    k: int = 2,
-) -> list[tuple[float, Any]]:
-    if vector_store is None or not sources:
-        return []
-    source_set = {str(s) for s in sources if str(s)}
-    if not source_set:
-        return []
-    candidates = [c for c in getattr(vector_store, "chunks", []) if str(getattr(c, "source", "")) in source_set]
-    if not candidates:
-        return []
-    q = np.array(query_embedding, dtype=np.float32)
-    matrix = np.array([c.embedding for c in candidates], dtype=np.float32)
-    norms = np.linalg.norm(matrix, axis=1)
-    qn = np.linalg.norm(q)
-    denom = np.maximum(norms * qn, 1e-8)
-    scores = (matrix @ q) / denom
-    idx = np.argsort(scores)[::-1][: max(int(k), 1)]
-    out: list[tuple[float, Any]] = []
-    for i in idx:
-        out.append((float(scores[i]), candidates[int(i)]))
-    return out
 
 
 def _build_evidence_snippet(text: str, query: str, max_chars: int = OPENVIKING_EVIDENCE_SNIPPET_MAX_CHARS) -> str:
@@ -645,82 +760,6 @@ def _rebuild_openviking_from_vector_store(
             }
         )
     return {"sources": len(source_map), "rebuilt": rebuilt, "stats": layered_store.stats()}
-
-
-def _collect_openviking_context(
-    query: str,
-    query_embedding: list[float],
-    user_store: VectorStore | None,
-    openviking_store: OpenVikingStore | None,
-) -> tuple[list[tuple[float, RetrievedContext]], dict[str, Any]]:
-    if not OPENVIKING_ENABLED or openviking_store is None:
-        return [], {"enabled": False}
-    l0_scored = openviking_store.search_layer(
-        query=query,
-        query_embedding=query_embedding,
-        layer="L0",
-        k=OPENVIKING_L0_TOPK,
-    )
-    if not l0_scored:
-        return [], {"enabled": True, "l0_hits": 0}
-    candidate_sources: list[str] = []
-    for _, item in l0_scored:
-        if item.source not in candidate_sources:
-            candidate_sources.append(item.source)
-
-    l1_scored = openviking_store.search_layer(
-        query=query,
-        query_embedding=query_embedding,
-        layer="L1",
-        k=OPENVIKING_L1_TOPK,
-        sources=candidate_sources,
-    )
-    if not l1_scored:
-        l1_scored = openviking_store.search_layer(
-            query=query,
-            query_embedding=query_embedding,
-            layer="L1",
-            k=OPENVIKING_L1_TOPK,
-        )
-    l2_scored = _top_chunks_from_sources(user_store, query_embedding, candidate_sources, k=OPENVIKING_L2_TOPK)
-
-    merged: list[tuple[float, RetrievedContext]] = []
-    for score, item in l1_scored:
-        title_prefix = f"{item.title}\n" if item.title else ""
-        merged.append(
-            (
-                float(score) + 0.08,
-                RetrievedContext(
-                    id=item.id,
-                    source=item.source,
-                    text=f"[L1概览]\n{title_prefix}{item.text}".strip(),
-                    layer="L1",
-                    title=item.title,
-                    refs=item.refs,
-                ),
-            )
-        )
-    for score, chunk in l2_scored:
-        merged.append(
-            (
-                float(score),
-                RetrievedContext(
-                    id=str(getattr(chunk, "id", "")),
-                    source=str(getattr(chunk, "source", "")),
-                    text=str(getattr(chunk, "text", "")),
-                    layer="L2",
-                ),
-            )
-        )
-
-    merged.sort(key=lambda x: x[0], reverse=True)
-    return merged[: max(OPENVIKING_L1_TOPK + OPENVIKING_L2_TOPK, 4)], {
-        "enabled": True,
-        "l0_hits": len(l0_scored),
-        "l1_hits": len(l1_scored),
-        "l2_hits": len(l2_scored),
-        "candidate_sources": candidate_sources,
-    }
 
 
 def _add_timeline_events(session_id: str, source: str, text: str, *, user_id: str | None = None) -> tuple[int, bool]:
@@ -1119,88 +1158,6 @@ def _ensure_internal_access(request: Request) -> None:
         raise HTTPException(status_code=401, detail="内部接口鉴权失败")
 
 
-def _format_source(source: str) -> str:
-    if source.startswith("internal/"):
-        return f"内部指南:{source.removeprefix('internal/')}"
-    if source.startswith("session/"):
-        return f"用户病例:{source.removeprefix('session/')}"
-    return source
-
-
-def _extract_cited_ranks(answer: str) -> set[int]:
-    cited: set[int] = set()
-    for match in re.finditer(r"\[证据#(\d+)\]", answer):
-        try:
-            cited.add(int(match.group(1)))
-        except Exception:
-            continue
-    return cited
-
-
-def _extract_cited_pages(answer: str) -> set[int]:
-    pages: set[int] = set()
-    for match in re.finditer(r"\[(?:P|p)\s*(\d{1,4})\]", answer):
-        try:
-            pages.add(int(match.group(1)))
-        except Exception:
-            continue
-    for match in re.finditer(r"第\s*(\d{1,4})\s*页", answer):
-        try:
-            pages.add(int(match.group(1)))
-        except Exception:
-            continue
-    return pages
-
-
-def _extract_page_from_text(text: str) -> int | None:
-    """Extract page number from text using multiple pattern strategies."""
-    # Pattern 1: Chinese page marker [第N页]
-    m = re.search(r"\[第\s*(\d{1,4})\s*页\]", text)
-    if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            pass
-    # Pattern 2: English page marker [P123] or [p123]
-    m = re.search(r"\[(?:P|p|page)\s*(\d{1,4})\]", text, re.IGNORECASE)
-    if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            pass
-    # Pattern 3: Page header/footer markers like "—12—" or "- 12 -"
-    m = re.search(r"[—\-]\s*(\d{1,4})\s*[—\-]", text)
-    if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            pass
-    # Pattern 4: Explicit "第X页" without brackets
-    m = re.search(r"第\s*(\d{1,4})\s*页", text)
-    if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            pass
-    return None
-
-
-def _extract_section_from_text(text: str) -> str | None:
-    """Try to identify the section/heading that a chunk belongs to."""
-    # Look for markdown headings
-    m = re.search(r"^(#{1,4})\s+(.+?)$", text, re.MULTILINE)
-    if m:
-        return m.group(2).strip()[:80]
-    # Look for numbered section headers like "3.2 xxx" or "第三章 xxx"
-    m = re.search(r"^(\d+\.[\d.]*\s+\S.+?)$", text, re.MULTILINE)
-    if m:
-        return m.group(1).strip()[:80]
-    m = re.search(r"(第[一二三四五六七八九十\d]+[章节条款]\s*\S.+?)[\n。]", text)
-    if m:
-        return m.group(1).strip()[:80]
-    return None
-
-
 MODEL_DISCLOSURE_PATTERNS = [
     re.compile(r"\bqwen\d*\b", re.IGNORECASE),
     re.compile(r"通义"),
@@ -1228,57 +1185,6 @@ def _sanitize_model_disclosure(answer: str) -> str:
     out = "\n".join(sanitized).strip()
     out = re.sub(r"(?:Qwen|通义|千问)\S*", "医疗助手", out, flags=re.IGNORECASE)
     return out
-
-
-def _should_use_external_literature(query: str, timeline_events: list[ClinicalEvent]) -> bool:
-    q = (query or "").strip().lower()
-    if not q:
-        return False
-
-    # --- Negative patterns: suppress false triggers for non-evidence queries ---
-    suppress_patterns = ("下载", "在哪里", "链接", "网址", "打不开", "登录", "注册", "密码")
-    if any(p in q for p in suppress_patterns):
-        return False
-
-    # --- Signal 1: Explicit evidence / literature request ---
-    explicit_terms = (
-        "文献", "论文", "研究", "依据", "证据", "共识",
-        "meta", "trial", "randomized", "nccn", "csco", "asco", "esmo",
-        "pubmed", "lancet", "nejm", "jco",
-    )
-    if any(t in q for t in explicit_terms):
-        return True
-
-    # --- Signal 2: Clinical decision questions needing evidence support ---
-    # These patterns indicate treatment/management decisions where literature matters.
-    clinical_decision_terms = (
-        "方案", "治疗", "用药", "换药", "化疗", "靶向", "免疫",
-        "二线", "三线", "一线", "后线",
-        "复发", "转移", "耐药", "进展",
-        "分期", "预后", "生存率", "生存期",
-        "手术", "切除", "新辅助", "辅助",
-        "推荐", "选择", "对比", "优劣",
-        "基因", "突变", "biomarker", "her2", "kras", "braf", "msi",
-    )
-    decision_score = sum(1 for t in clinical_decision_terms if t in q)
-    if decision_score >= 2:
-        return True
-
-    # --- Signal 3: Complex patient with any clinical management question ---
-    if len(timeline_events) >= 3 and decision_score >= 1:
-        return True
-
-    # --- Signal 4: Guideline-related but asked as a clinical question ---
-    guideline_context_terms = ("指南", "规范", "标准", "guideline")
-    if any(t in q for t in guideline_context_terms) and decision_score >= 1:
-        return True
-
-    # --- Signal 5: Interpretation/Analysis intent ---
-    interpretation_terms = ("解读", "分析", "看看", "评估", "含义")
-    if any(t in q for t in interpretation_terms) and (len(timeline_events) >= 1 or decision_score >= 1):
-        return True
-
-    return False
 
 
 
@@ -1334,65 +1240,422 @@ def _assess_reasoning_mode(
     return mode, {"score": score, "reasons": reasons}
 
 
-def _apply_citation_projection(answer: str, ranked_sources: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
-    sources = list(ranked_sources)
-    cited_ranks = _extract_cited_ranks(answer)
-    available_ranks = {int(s.get("rank", -1)) for s in ranked_sources}
-    citation_warning = ""
-    if cited_ranks:
-        valid_cited = {r for r in cited_ranks if r in available_ranks}
-        invalid_cited = sorted([r for r in cited_ranks if r not in available_ranks])
-        if valid_cited:
-            sources = [s for s in ranked_sources if int(s.get("rank", -1)) in valid_cited]
-            if invalid_cited:
-                citation_warning = f"存在越界引用: {invalid_cited}，已展示可用证据。"
-        else:
-            citation_warning = f"引用编号越界: {invalid_cited}。已回退展示可用证据。"
-            sources = ranked_sources[: min(3, len(ranked_sources))]
-    else:
-        cited_pages = _extract_cited_pages(answer)
-        if cited_pages:
-            page_tags = [f"[第{p}页]" for p in cited_pages]
-            filtered = []
-            for s in ranked_sources:
-                evidence = str(s.get("evidence", ""))
-                if any(tag in evidence for tag in page_tags):
-                    filtered.append(s)
-            sources = filtered if filtered else ranked_sources[:2]
-        else:
-            sources = []
-    return sources, citation_warning
+def _is_complex_viking_query(query: str, history: list[dict[str, str]] | None = None) -> bool:
+    q = str(query or "").strip().lower()
+    if not q:
+        return False
+    multi_terms = ("以及", "并且", "分别", "对比", "差异", "还是", "vs", "同时", "还想问")
+    decision_terms = ("治疗", "方案", "风险", "证据", "依据", "流程", "指南", "recommend", "should")
+    if any(t in q for t in multi_terms):
+        return True
+    if sum(1 for t in decision_terms if t in q) >= 2:
+        return True
+    if len(q) >= 60:
+        return True
+    return bool(history and len(history) >= 3)
 
 
-def _extract_key_conclusions(evidence_guard: dict[str, Any], max_items: int = 4) -> list[dict[str, Any]]:
-    checks = evidence_guard.get("checks", [])
-    key_conclusions: list[dict[str, Any]] = []
-    if not isinstance(checks, list):
-        return key_conclusions
-    sorted_checks = sorted(
-        checks,
-        key=lambda c: (
-            0 if bool(c.get("supported")) else 1,
-            -(float(c.get("support_score", 0.0) or 0.0)),
-        ),
+def _needs_l2_drilldown(query: str) -> bool:
+    q = str(query or "").strip().lower()
+    if not q:
+        return False
+    l2_terms = (
+        "具体数值",
+        "具体数据",
+        "百分比",
+        "公式",
+        "代码",
+        "原文",
+        "逐字",
+        "表格",
+        "第几页",
+        "引用",
+        "exact",
+        "verbatim",
+        "table",
     )
-    for item in sorted_checks:
-        cited = item.get("cited_ranks", [])
-        if not isinstance(cited, list) or not cited:
+    return any(t in q for t in l2_terms)
+
+
+def _wants_deep_answer(query: str) -> bool:
+    q = str(query or "").strip().lower()
+    if not q:
+        return False
+    return any(t in q for t in ("深入", "详细", "全面", "原理", "比较", "why", "how"))
+
+
+def _build_response_style_hint(query: str, reasoning_mode: str, history: list[dict[str, str]] | None = None) -> str:
+    q = str(query or "").strip().lower()
+    multi_part_terms = ("以及", "并且", "分别", "对比", "差异", "优缺点", "方案", "风险", "依据")
+    asks_structure = any(t in q for t in multi_part_terms)
+    has_multi_turn = bool(history and len(history) >= 3)
+    needs_structured = (
+        str(reasoning_mode or "").lower() == "deep"
+        or _wants_deep_answer(query)
+        or len(q) >= 40
+        or asks_structure
+        or has_multi_turn
+    )
+    if not needs_structured:
+        return (
+            "输出风格：当前问题偏简单，请直接自然回答，控制在1-2段内。"
+            "不要加固定标题，不要硬分“结论/依据/下一步”。"
+            "若需给出证据，仅为关键结论添加少量[证据#N]。"
+            "除非用户明确要求或确有必要，不要给“下一步建议”。"
+        )
+    return (
+        "输出风格：按任务复杂度自适应组织内容。"
+        "先回答用户最关心的问题，再补充必要背景。"
+        "可使用少量小标题或要点帮助阅读，但不要固定成同一模板。"
+        "不要为每一句都加证据标签；只给关键结论、关键数字、关键建议加[证据#N]。"
+        "仅当用户明确要求、证据不足或存在明显风险时，才提供“下一步建议”。"
+    )
+
+
+def _extract_retrieval_keywords(query: str, max_terms: int = 5) -> list[str]:
+    terms = re.findall(r"[A-Za-z0-9_+\-]{2,}|[\u4e00-\u9fff]{2,}", str(query or ""))
+    stop = {"请问", "这个", "那个", "一下", "什么", "怎么", "是否", "可以", "需要", "如果"}
+    out: list[str] = []
+    for t in terms:
+        if t in stop:
             continue
-        key_conclusions.append(
+        if t not in out:
+            out.append(t)
+        if len(out) >= max(max_terms, 1):
+            break
+    return out
+
+
+def _source_title_from_uri(uri: str) -> str:
+    return str(uri or "").rstrip("/").split("/")[-1]
+
+
+def _run_viking_retrieval(
+    query: str,
+    stores: list[tuple[str, OpenVikingStore]],
+    history: list[dict[str, str]],
+    session_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    is_complex = _is_complex_viking_query(query, history)
+    query_embedding = _global_embed(query)
+    trace: dict[str, Any] = {
+        "enabled": True,
+        "mode": "search" if is_complex else "find",
+        "stores": [],
+    }
+    merged: list[dict[str, Any]] = []
+
+    for store_name, store in stores:
+        store_session = None
+        if is_complex:
+            store_session = store.session(session_id=f"{store.namespace}-{session_id}")
+        if is_complex:
+            rows = store.search(
+                query=query,
+                target_uri=store.base_uri,
+                session=store_session,
+                limit=max(OPENVIKING_RAG_L1_BUDGET * 2, 8),
+            )
+        else:
+            rows = store.find(
+                query=query,
+                target_uri=store.base_uri,
+                limit=max(OPENVIKING_RAG_L1_BUDGET * 2, 8),
+            )
+        used_legacy_fallback = False
+        if not rows:
+            # Native unavailable or returned empty; fallback to legacy layer search.
+            legacy = store.search_layer(
+                query=query,
+                query_embedding=query_embedding,
+                layer="L1",
+                k=max(OPENVIKING_RAG_L1_BUDGET * 2, 8),
+            )
+            rows = []
+            for score, item in legacy:
+                legacy_uri = str((item.meta or {}).get("uri") or f"{store.base_uri}/{item.id}")
+                rows.append(
+                    {
+                        "uri": legacy_uri,
+                        "score": float(score),
+                        "is_leaf": False,
+                        "abstract": str(item.text or "").strip(),
+                        "overview": str(item.text or "").strip(),
+                    }
+                )
+            used_legacy_fallback = bool(rows)
+        trace["stores"].append(
             {
-                "claim": str(item.get("claim", ""))[:200],
-                "supported": bool(item.get("supported")),
-                "sufficiency": str(item.get("sufficiency", "low")),
-                "support_score": float(item.get("support_score", 0.0) or 0.0),
-                "cited_ranks": cited[:3],
-                "reason": str(item.get("reason", "")),
+                "store": store_name,
+                "target_uri": store.base_uri,
+                "hits": len(rows),
+                "legacy_fallback": used_legacy_fallback,
             }
         )
-        if len(key_conclusions) >= max(max_items, 1):
+        for item in rows:
+            uri = str(item.get("uri", "") or "")
+            if not uri:
+                continue
+            merged.append(
+                {
+                    "store_name": store_name,
+                    "store": store,
+                    "uri": uri,
+                    "score": float(item.get("score", 0.0) or 0.0),
+                    "is_leaf": bool(item.get("is_leaf", False)),
+                    "abstract": str(item.get("abstract", "") or "").strip(),
+                    "overview": str(item.get("overview", "") or "").strip(),
+                }
+            )
+    merged.sort(key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+    return merged, trace
+
+
+def _build_viking_evidence_bundle(
+    query: str,
+    hits: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    deep_mode = _wants_deep_answer(query)
+    need_l2 = _needs_l2_drilldown(query)
+    l1_budget = OPENVIKING_RAG_DEEP_L1_BUDGET if deep_mode else OPENVIKING_RAG_L1_BUDGET
+    l2_budget = OPENVIKING_RAG_DEEP_L2_BUDGET if deep_mode else OPENVIKING_RAG_L2_BUDGET
+    if not need_l2:
+        l2_budget = 0
+
+    evidence: list[dict[str, Any]] = []
+    seen_uri: set[str] = set()
+    l1_count = 0
+
+    for hit in hits:
+        if l1_count >= l1_budget:
             break
-    return key_conclusions
+        uri = str(hit.get("uri", "") or "")
+        if not uri or uri in seen_uri:
+            continue
+        store = hit.get("store")
+        if not isinstance(store, OpenVikingStore):
+            continue
+        text = str(hit.get("overview", "") or hit.get("abstract", "")).strip()
+        if not text:
+            text = store.overview(uri)
+        if not text:
+            continue
+        seen_uri.add(uri)
+        l1_count += 1
+        evidence.append(
+            {
+                "uri": uri,
+                "citation": f"{uri}@L1",
+                "layer": "L1",
+                "score": float(hit.get("score", 0.0) or 0.0),
+                "text": text,
+                "store_name": str(hit.get("store_name", "") or ""),
+                "title": _source_title_from_uri(uri),
+            }
+        )
+
+    if l1_count < l1_budget and hits:
+        # Recall补救：在命中目录下展开子节点（ls）。
+        for hit in hits[:3]:
+            if l1_count >= l1_budget:
+                break
+            uri = str(hit.get("uri", "") or "")
+            store = hit.get("store")
+            if not uri or not isinstance(store, OpenVikingStore):
+                continue
+            children = store.ls(uri)
+            for child in children[:6]:
+                if l1_count >= l1_budget:
+                    break
+                child_uri = str(child.get("uri", "") or "")
+                if not child_uri or child_uri in seen_uri:
+                    continue
+                text = store.overview(child_uri)
+                if not text:
+                    continue
+                seen_uri.add(child_uri)
+                l1_count += 1
+                evidence.append(
+                    {
+                        "uri": child_uri,
+                        "citation": f"{child_uri}@L1",
+                        "layer": "L1",
+                        "score": float(hit.get("score", 0.0) or 0.0),
+                        "text": text,
+                        "store_name": str(hit.get("store_name", "") or ""),
+                        "title": _source_title_from_uri(child_uri),
+                    }
+                )
+
+    if l1_count < l1_budget and hits:
+        # Recall仍不足时，按关键词做glob扩展。
+        keywords = _extract_retrieval_keywords(query, max_terms=3)
+        for hit in hits[:3]:
+            if l1_count >= l1_budget:
+                break
+            uri = str(hit.get("uri", "") or "")
+            store = hit.get("store")
+            if not uri or not isinstance(store, OpenVikingStore):
+                continue
+            for kw in keywords:
+                if l1_count >= l1_budget:
+                    break
+                matched = store.glob(pattern=f"*{kw}*", root_uri=uri)
+                for m_uri in matched[:4]:
+                    if l1_count >= l1_budget:
+                        break
+                    if not m_uri or m_uri in seen_uri:
+                        continue
+                    text = store.overview(m_uri)
+                    if not text:
+                        continue
+                    seen_uri.add(m_uri)
+                    l1_count += 1
+                    evidence.append(
+                        {
+                            "uri": m_uri,
+                            "citation": f"{m_uri}@L1",
+                            "layer": "L1",
+                            "score": float(hit.get("score", 0.0) or 0.0),
+                            "text": text,
+                            "store_name": str(hit.get("store_name", "") or ""),
+                            "title": _source_title_from_uri(m_uri),
+                        }
+                    )
+
+    if l2_budget > 0:
+        l2_count = 0
+        for hit in hits:
+            if l2_count >= l2_budget:
+                break
+            uri = str(hit.get("uri", "") or "")
+            store = hit.get("store")
+            if not uri or not isinstance(store, OpenVikingStore):
+                continue
+            text = store.read(uri)
+            if not text:
+                continue
+            l2_count += 1
+            evidence.append(
+                {
+                    "uri": uri,
+                    "citation": f"{uri}#L?",
+                    "layer": "L2",
+                    "score": float(hit.get("score", 0.0) or 0.0),
+                    "text": text[:2600],
+                    "store_name": str(hit.get("store_name", "") or ""),
+                    "title": _source_title_from_uri(uri),
+                }
+            )
+
+    return evidence, {"l1_budget": l1_budget, "l2_budget": l2_budget, "need_l2": need_l2}
+
+
+def _extract_source_citations(answer: str) -> set[str]:
+    cited: set[str] = set()
+    for m in re.finditer(r"\[source:\s*([^\]]+)\]", str(answer or ""), flags=re.IGNORECASE):
+        value = str(m.group(1) or "").strip()
+        if value:
+            cited.add(value)
+    return cited
+
+
+def _extract_evidence_ranks(answer: str) -> set[int]:
+    ranks: set[int] = set()
+    for m in re.finditer(
+        r"\[(?:证据|evidence)\s*#\s*(\d+)(?:\s*@\s*[A-Za-z0-9?_+\-]+)?\]",
+        str(answer or ""),
+        flags=re.IGNORECASE,
+    ):
+        try:
+            rank = int(str(m.group(1) or "0"))
+        except Exception:
+            continue
+        if rank > 0:
+            ranks.add(rank)
+    return ranks
+
+
+def _normalize_answer_citations(answer: str, ranked_sources: list[dict[str, Any]] | None = None) -> str:
+    _ = ranked_sources
+    text = str(answer or "")
+    if not text:
+        return text
+
+    # Normalize typed source tags: [pathology: ...] -> [source: ...]
+    text = re.sub(
+        r"\[(source|pathology|imaging|observation|treatment|lab|stage)\s*:\s*([^\]]+)\]",
+        lambda m: f"[source: {str(m.group(2) or '').strip()}]",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Normalize literature tags to a single display form.
+    text = re.sub(
+        r"\[(?:literature|paper|文献)\s*#\s*(\d+)\]",
+        lambda m: f"[文献#{m.group(1)}]",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Normalize evidence tags to a single display form: [证据#N].
+    def _replace_evidence_tag(match: re.Match[str]) -> str:
+        raw_rank = str(match.group(1) or "").strip()
+        if not raw_rank.isdigit():
+            return match.group(0)
+        rank = int(raw_rank)
+        return f"[证据#{rank}]"
+
+    text = re.sub(
+        r"\[(?:evidence|证据)\s*#\s*(\d+)(?:\s*@\s*[A-Za-z0-9?_+\-]+)?\]",
+        _replace_evidence_tag,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Collapse immediate duplicated [source: ...] markers.
+    text = re.sub(
+        r"(\[source:\s*[^\]]+\])(?:\s+\1)+",
+        r"\1",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
+
+
+def _build_openviking_evidence_guard(answer: str, evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    if not evidence:
+        return {
+            "coverage": 0.0,
+            "unsupported_claims": 1,
+            "verified_claims": 0,
+            "checks": [],
+        }
+    cited_sources = _extract_source_citations(answer)
+    cited_ranks = _extract_evidence_ranks(answer)
+    expected = [str(e.get("citation", "") or "") for e in evidence]
+    audit_scope = expected[: min(len(expected), 4)]
+
+    covered_by_source = sum(1 for c in audit_scope if c and c in cited_sources)
+    covered_by_rank = sum(1 for r in cited_ranks if 1 <= r <= len(audit_scope))
+    covered = max(covered_by_source, covered_by_rank)
+    required = 1 if len(audit_scope) <= 2 else 2
+    coverage = round(float(covered) / max(len(audit_scope), 1), 4)
+    return {
+        "coverage": coverage,
+        "unsupported_claims": 0 if covered >= required else 1,
+        "verified_claims": covered,
+        "checks": [
+            {
+                "type": "citation_presence",
+                "required": required,
+                "covered": covered,
+                "scope": len(audit_scope),
+                "by_source": covered_by_source,
+                "by_rank": covered_by_rank,
+            }
+        ],
+    }
 
 
 class ChatRequest(BaseModel):
@@ -1420,6 +1683,10 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangeUsernameRequest(BaseModel):
+    new_username: str
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -1442,10 +1709,12 @@ def health() -> dict[str, Any]:
         "ocr_provider": OCR_PROVIDER,
         "paddle_available": is_paddle_available(),
         "pdf_ocr_max_pages": PDF_OCR_MAX_PAGES,
-        "internal_chunks": len(internal_store.chunks),
+        "internal_chunks": int(internal_openviking_store.stats().get("total", 0)),
         "active_sessions": len(session_stores),
         "active_timelines": len(session_timeline_events),
+        "active_chat_progress": len(chat_progress_states),
         "session_ttl_seconds": SESSION_TTL_SECONDS,
+        "chat_completion_timeout_seconds": CHAT_COMPLETION_TIMEOUT_SECONDS,
         "manual_session_clear_only": MANUAL_SESSION_CLEAR_ONLY,
         "audit_log_path": str(AUDIT_LOG_PATH.relative_to(ROOT)),
         "models": {"hidden": True},
@@ -1455,6 +1724,8 @@ def health() -> dict[str, Any]:
         "openviking_l0_topk": OPENVIKING_L0_TOPK,
         "openviking_l1_topk": OPENVIKING_L1_TOPK,
         "openviking_l2_topk": OPENVIKING_L2_TOPK,
+        "openviking_rag_l1_budget": OPENVIKING_RAG_L1_BUDGET,
+        "openviking_rag_l2_budget": OPENVIKING_RAG_L2_BUDGET,
         "local_literature_agent_enabled": ENABLE_LOCAL_LITERATURE_AGENT,
         "local_literature_records": len(literature_index),
         "local_literature_last_refresh_at": int(literature_last_refresh_at) if literature_last_refresh_at else None,
@@ -1581,6 +1852,31 @@ def user_delete_data(request: Request) -> JSONResponse:
     )
     return JSONResponse({"ok": True, **result})
 
+
+@app.post("/api/user/change-username")
+def user_change_username(request: Request, payload: ChangeUsernameRequest) -> JSONResponse:
+    user, user_id = _get_auth_user(request)
+    if not user:
+        return JSONResponse({"ok": False, "error": "not_authenticated"}, status_code=401)
+
+    old_username = user.username
+    ok, result = user_manager.change_username(user_id=user_id, new_username=payload.new_username)
+    if not ok:
+        return JSONResponse({"ok": False, "error": result}, status_code=400)
+
+    updated_user, _ = _get_auth_user(request)
+    audit_logger.log(
+        event_type="user_username_changed",
+        session_id=user_id,
+        details={
+            "old_username": old_username,
+            "new_username": updated_user.username if updated_user else payload.new_username,
+        },
+    )
+    return JSONResponse({
+        "ok": True,
+        "user": user_manager.get_user_info(updated_user) if updated_user else {},
+    })
 
 
 @app.post("/api/user/delete-account")
@@ -1811,7 +2107,7 @@ def import_guidelines(payload: ImportGuidelinesRequest, request: Request) -> JSO
     prev_hashes: dict[str, str] = manifest.get("files", {})
 
     if payload.reset:
-        internal_store.clear()
+        internal_openviking_store.clear()
         prev_hashes = {}  # treat everything as new
 
     # Compute current hashes and detect changes.
@@ -1828,11 +2124,7 @@ def import_guidelines(payload: ImportGuidelinesRequest, request: Request) -> JSO
     deleted_files = set(prev_hashes.keys()) - set(current_hashes.keys())
     for deleted_rel in deleted_files:
         del_source = f"internal/{deleted_rel}"
-        internal_store.chunks = [c for c in internal_store.chunks if c.source != del_source]
-    if deleted_files and hasattr(internal_store, '_matrix'):
-        internal_store._matrix = None  # invalidate cache
-    if deleted_files and hasattr(internal_store, '_persist'):
-        internal_store._persist()
+        internal_openviking_store.remove_source(del_source)
 
     results = []
     has_error = False
@@ -1843,25 +2135,42 @@ def import_guidelines(payload: ImportGuidelinesRequest, request: Request) -> JSO
         if file_path not in changed_files:
             skipped += 1
             continue
-        # Remove old chunks for this file before re-adding.
-        internal_store.chunks = [c for c in internal_store.chunks if c.source != source]
-        if hasattr(internal_store, '_matrix'):
-            internal_store._matrix = None
+        # Remove old layers for this file before re-adding.
+        internal_openviking_store.remove_source(source)
         try:
             text = _extract_file_text(file_path, None, ocr_mode="guide")
             chunks = split_text(text)
-            added = internal_store.add_texts(
+            class _ImportChunk:
+                def __init__(self, text: str) -> None:
+                    self.text = text
+
+            pseudo_chunks = [_ImportChunk(item) for item in chunks]
+            layered = _upsert_openviking_layers(
+                internal_openviking_store,
                 source=source,
-                texts=chunks,
-                embed_fn=lambda t: embed_text(client, EMBEDDING_MODEL, t),
+                chunks=pseudo_chunks,
             )
-            results.append({"file": relative, "chunks": added, "ok": True, "action": "updated"})
+            results.append(
+                {
+                    "file": relative,
+                    "chunks": len(chunks),
+                    "openviking_l0": int(layered.get("l0", 0)),
+                    "openviking_l1": int(layered.get("l1", 0)),
+                    "ok": True,
+                    "action": "updated",
+                }
+            )
         except HTTPException as exc:
             has_error = True
             results.append({"file": relative, "ok": False, "error": exc.detail})
         except Exception as exc:
             has_error = True
             results.append({"file": relative, "ok": False, "error": str(exc)})
+
+    if OPENVIKING_ENABLED:
+        wait_state = internal_openviking_store.wait_processed(timeout=120.0)
+    else:
+        wait_state = {"ok": False, "reason": "openviking_disabled"}
 
     # Update version manifest.
     manifest["files"] = current_hashes
@@ -1873,7 +2182,7 @@ def import_guidelines(payload: ImportGuidelinesRequest, request: Request) -> JSO
         "deleted": len(deleted_files),
         "skipped": skipped,
         "total_files": len(files),
-        "total_chunks": len(internal_store.chunks),
+        "total_chunks": int(internal_openviking_store.stats().get("total", 0)),
     })
     manifest["history"] = history[-50:]  # keep last 50 entries
     _save_guideline_versions(manifest)
@@ -1883,7 +2192,8 @@ def import_guidelines(payload: ImportGuidelinesRequest, request: Request) -> JSO
         {
             "ok": not has_error,
             "results": results,
-            "internal_chunks": len(internal_store.chunks),
+            "internal_chunks": int(internal_openviking_store.stats().get("total", 0)),
+            "wait_processed": wait_state,
             "reset": payload.reset,
             "skipped_unchanged": skipped,
             "deleted_files": sorted(deleted_files),
@@ -1945,454 +2255,256 @@ def delete_guideline(request: Request, filename: str) -> JSONResponse:
     return JSONResponse({"ok": False, "msg": "文件不存在"}, status_code=404)
 
 
+@app.get("/api/chat/progress")
+def chat_progress(request_id: str) -> JSONResponse:
+    payload = _chat_progress_payload(request_id)
+    if payload is None:
+        return JSONResponse({"ok": False, "error": "request_id_not_found"}, status_code=404)
+    return JSONResponse({"ok": True, "progress": payload})
+
+
 @app.post("/api/chat")
 def chat(payload: ChatRequest, request: Request) -> JSONResponse:
     if not payload.message.strip():
         raise HTTPException(status_code=400, detail="\u6d88\u606f\u4e0d\u80fd\u4e3a\u7a7a")
 
+    incoming_request_id = request.headers.get("x-chat-request-id", "").strip()
+    chat_request_id = _normalize_session_id(incoming_request_id) or f"c-{uuid.uuid4().hex[:16]}"
     auth_user, auth_user_id = _get_auth_user(request)
     session_id = _get_session_id(request)
-    query_embedding = _global_embed(payload.message)
-    cached_embed = lambda _text: query_embedding
+    progress_session_id = auth_user_id or session_id
+    _chat_progress_begin(chat_request_id, progress_session_id)
 
-    def _embed_with_cache(text: str) -> list[float]:
-        return _global_embed(text)
-
-    # Retrieve from internal guidelines + user context (OpenViking preferred).
-    _INTERNAL_BOOST = 0.03  # slight boost so guidelines win ties
-    internal_scored = internal_store.similarity_search_with_scores(
-        payload.message,
-        embed_fn=cached_embed,
-        k=4,
-    )
-    internal_context_scored: list[tuple[float, RetrievedContext]] = [
-        (
-            float(score),
-            RetrievedContext(
-                id=str(chunk.id),
-                source=str(chunk.source),
-                text=str(chunk.text),
-                layer="L2",
-            ),
-        )
-        for score, chunk in internal_scored
-    ]
-    session_scored: list[tuple[float, RetrievedContext]] = []
-    openviking_trace: dict[str, Any] = {"enabled": False}
-    # Use persistent user store if authenticated
-    if auth_user_id:
-        user_store = _get_user_store(auth_user_id)
-        openviking_store = _get_user_openviking_store(auth_user_id) if OPENVIKING_ENABLED else None
-    else:
-        user_store = _get_session_store(session_id)
-        openviking_store = _get_session_openviking_store(session_id) if OPENVIKING_ENABLED else None
-    timeline_events = _get_timeline_events(session_id, user_id=auth_user_id)
-    reasoning_mode, reasoning_meta = _assess_reasoning_mode(
-        payload.message,
-        timeline_events,
-        payload.history,
-    )
-    timeline_state = encode_timeline_state(timeline_events, encoder=TIMELINE_ENCODER)
-    retrieval_hint = build_retrieval_hint(payload.message, timeline_events, state=timeline_state)
-    timeline_summary = build_timeline_summary(timeline_events, max_items=8)
-
-    if user_store is not None and OPENVIKING_ENABLED and openviking_store is not None:
-        layered_total = int(openviking_store.stats().get("total", 0) or 0)
-        if layered_total == 0 and len(getattr(user_store, "chunks", [])) > 0:
-            auto_rebuild = _rebuild_openviking_from_vector_store(
-                openviking_store,
-                user_store,
-                reset=False,
-            )
-            openviking_trace["auto_rebuild"] = {
-                "sources": int(auto_rebuild.get("sources", 0) or 0),
-                "stats": auto_rebuild.get("stats", {}),
-            }
-
-    # Priority path: L0 -> L1 -> optional L2 drill-down.
-    if user_store is not None and OPENVIKING_ENABLED and openviking_store is not None:
-        session_scored, layered_trace = _collect_openviking_context(
-            query=payload.message,
-            query_embedding=query_embedding,
-            user_store=user_store,
-            openviking_store=openviking_store,
-        )
-        openviking_trace.update(layered_trace)
-
-    # Fallback: flat L2 retrieval when layered memory isn't available yet.
-    if user_store is not None and not session_scored:
-        flat_scored = user_store.similarity_search_with_scores(
+    try:
+        _chat_progress_update(chat_request_id, "analyzing_question")
+        timeline_events = _get_timeline_events(session_id, user_id=auth_user_id)
+        reasoning_mode, reasoning_meta = _assess_reasoning_mode(
             payload.message,
-            embed_fn=cached_embed,
-            k=4,
+            timeline_events,
+            payload.history,
         )
-        session_scored = [
-            (
-                float(score),
-                RetrievedContext(
-                    id=str(chunk.id),
-                    source=str(chunk.source),
-                    text=str(chunk.text),
-                    layer="L2",
-                ),
-            )
-            for score, chunk in flat_scored
-        ]
-        openviking_trace.setdefault("fallback_flat_l2", True)
+        timeline_state = encode_timeline_state(timeline_events, encoder=TIMELINE_ENCODER)
+        retrieval_hint = build_retrieval_hint(payload.message, timeline_events, state=timeline_state)
+        timeline_summary = build_timeline_summary(timeline_events, max_items=8)
+        openviking_trace: dict[str, Any] = {"enabled": OPENVIKING_ENABLED}
 
-    # Merge by similarity score (internal chunks get a small boost at ties).
-    _merged = [(score + _INTERNAL_BOOST, chunk) for score, chunk in internal_context_scored] + list(session_scored)
-    _merged.sort(key=lambda item: item[0], reverse=True)
-    all_scored = _merged[:6]
-    context_chunks = [item[1] for item in all_scored]
-    context = "\n\n".join([f"[来源:{_format_source(c.source)}]\n{c.text}" for c in context_chunks])
-    if not context:
-        context = "暂无可用资料。"
-    external_literature = []
-    use_external_literature = _should_use_external_literature(
-        payload.message,
-        timeline_events,
-    )
-    if use_external_literature:
-        _refresh_local_literature_if_needed(force=False, max_results=LITERATURE_AGENT_BOOTSTRAP_MAX_RESULTS)
-        local_literature: list[dict[str, object]] = []
-        web_literature: list[dict[str, object]] = []
-        if ENABLE_LOCAL_LITERATURE_AGENT:
-            local_literature = search_from_local_store(
+        user_store = _get_user_store(auth_user_id) if auth_user_id else _get_session_store(session_id)
+        user_openviking_store = (
+            _get_user_openviking_store(auth_user_id)
+            if auth_user_id
+            else _get_session_openviking_store(session_id)
+        ) if OPENVIKING_ENABLED else None
+
+        if user_store is not None and user_openviking_store is not None:
+            layered_total = int(user_openviking_store.stats().get("total", 0) or 0)
+            if layered_total == 0 and len(getattr(user_store, "chunks", [])) > 0:
+                auto_rebuild = _rebuild_openviking_from_vector_store(
+                    user_openviking_store,
+                    user_store,
+                    reset=False,
+                )
+                openviking_trace["auto_rebuild"] = {
+                    "sources": int(auto_rebuild.get("sources", 0) or 0),
+                    "stats": auto_rebuild.get("stats", {}),
+                }
+
+        stores: list[tuple[str, OpenVikingStore]] = [("internal", internal_openviking_store)]
+        if user_openviking_store is not None:
+            stores.append(("user", user_openviking_store))
+
+        _chat_progress_update(chat_request_id, "retrieving_evidence")
+        all_hits, retrieval_trace = _run_viking_retrieval(
+            query=payload.message,
+            stores=stores,
+            history=payload.history,
+            session_id=progress_session_id,
+        )
+        openviking_trace.update(retrieval_trace)
+
+        _chat_progress_update(chat_request_id, "building_context", meta={"retrieved_hits": len(all_hits)})
+        evidence_items, budget_trace = _build_viking_evidence_bundle(payload.message, all_hits)
+        openviking_trace.update(budget_trace)
+        openviking_trace["retrieved_hits"] = len(all_hits)
+        openviking_trace["evidence_items"] = len(evidence_items)
+
+        ranked_sources: list[dict[str, Any]] = []
+        context_rows: list[str] = []
+        for rank, item in enumerate(evidence_items, start=1):
+            snippet = _build_evidence_snippet(
+                str(item.get("text", "")),
                 payload.message,
-                embed_fn=_embed_with_cache,
-                top_k=LITERATURE_TOP_K,
-                index=literature_index,
+                max_chars=1600 if str(item.get("layer", "L1")) == "L2" else 900,
             )
-        if ENABLE_WEB_LITERATURE:
-            web_literature = [
-                item.as_dict()
-                for item in search_literature(
-                    payload.message,
-                    providers=LITERATURE_PROVIDERS,
-                    top_k=LITERATURE_TOP_K,
-                    timeout=LITERATURE_TIMEOUT_SECONDS,
-                    embed_fn=_embed_with_cache,
-                    medical_oncology_only=LITERATURE_MEDICAL_ONCOLOGY_ONLY,
-                    min_relevance=LITERATURE_MIN_RELEVANCE,
-                )
-            ]
-        # Merge and deduplicate by doc_id or DOI.
-        seen_ids: set[str] = set()
-        merged_literature: list[dict[str, object]] = []
-        for item in local_literature + web_literature:
-            dedup_key = str(item.get("doc_id") or item.get("doi") or item.get("title", "")).strip().lower()
-            if dedup_key and dedup_key in seen_ids:
-                continue
-            if dedup_key:
-                seen_ids.add(dedup_key)
-            merged_literature.append(item)
-        # Sort by relevance score descending.
-        merged_literature.sort(key=lambda x: float(x.get("relevance", 0) or 0), reverse=True)
-        external_literature = merged_literature[:LITERATURE_TOP_K]
-    literature_context = literature_to_context(external_literature, max_items=LITERATURE_TOP_K)
+            citation = str(item.get("citation", "") or "")
+            uri = str(item.get("uri", "") or "")
+            layer = str(item.get("layer", "L1"))
+            score = round(float(item.get("score", 0.0) or 0.0), 4)
+            store_name = str(item.get("store_name", "openviking") or "openviking")
+            context_rows.append(
+                f"[evidence#{rank}] [source: {citation}] [layer: {layer}] [store: {store_name}]\n{snippet}"
+            )
+            ranked_sources.append(
+                {
+                    "rank": rank,
+                    "score": score,
+                    "chunk_id": f"{uri}::{layer}",
+                    "source": uri,
+                    "source_raw": uri,
+                    "type": store_name,
+                    "layer": layer,
+                    "title": str(item.get("title", "") or ""),
+                    "page": None,
+                    "section": None,
+                    "text_length": len(str(item.get("text", "") or "")),
+                    "preview": snippet[:220],
+                    "evidence": snippet,
+                    "citation": citation,
+                }
+            )
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "你是一位经验丰富、温和且严谨的肿瘤科主治医师。你的对话对象是焦虑的患者或家属。\n"
-                "你的核心任务：像在门诊面对面交流一样，用“我”的视角解读病历，给出有温度、有依据的专业建议。\n\n"
-                "【沟通风格：医生视角 + 自然对话】\n"
-                "- **第一人称（强制）**：必须时刻使用“我看了您的...”、“我认为...”、“我建议...”。严禁使用“该患者”、“根据结果显示”这种第三方冷漠语体。\n"
-                "- **拒绝机器味**：严禁上来就罗列“一、xxx；二、xxx”。请像真人聊天一样，用自然的连接词（“首先...”、“从目前的指标看...”、“至于您担心的...”）来组织语言。\n"
-                "- **共情与安抚**：在抛出异常指标或坏消息前，必须先有一句缓冲（如“这个指标确实偏高，但先别急，我们需要结合影像看...”）。\n\n"
-                "【版面美学：清晰大方】\n"
-                "虽然语气是口语化的，但排版必须清晰易读。请巧妙利用 Markdown：\n"
-                "- **小标题引导**：用 `### 关于报告解读`、`### 下一步建议` 等小标题区隔话题，不要挤成一团。\n"
-                "- **重点加粗**：关键的药物名、检查项、异常值请用 **粗体** 高亮，方便患者一眼抓重点。\n"
-                "- **适度列表**：列举多个检查项目或注意事项时，请使用无序列表（- ），保持整洁。\n\n"
-                "【临床逻辑：严谨闭环】\n"
-                "- **先核实，后建议**：若病历信息孤立（如只有一张化验单），必须先询问前情（“这是术后复查还是初诊？之前做过什么治疗？”），不要盲目建议做已完成的检查。\n"
-                "- **条件式建议**：尽量说“若您近期未查...建议...”，而不是生硬的“请去做...”。\n\n"
-                "【范例参考（请模仿这种语感）】\n"
-                "❌ 错误：\n"
-                "一、诊断结果：CA19-9升高。\n"
-                "二、风险评估：高风险。\n"
-                "三、建议：进行PET-CT检查。\n\n"
-                "✅ 正确：\n"
-                "### 📋 关于您的血液报告\n"
-                "我仔细看了您上传的化验单，**CA19-9** 这一项指标确实引起了我的注意，它比正常值高出了一些。这通常提示我们需要警惕消化道来源的问题，但也可能是炎症引起的波动。\n\n"
-                "### 💡 我的建议\n"
-                "考虑到您之前已经做过切除手术，我倾向于认为这需要进一步排查。**如果您近期没有做过全腹增强CT**，我强烈建议您安排一次，以排除复发的可能..."
-                "【临床推理与证据约束（当接入资料时启用）】\n"
-                "- 先形成可检验结论（claims），再检查每条是否有证据支撑；无法支撑的改为不确定表述或删除。\n"
-                "- 若用户要求依据/来源或你引用外部资料，仅提供 1-3 条关键依据，避免论文化表达。\n\n"
-                "- 简单问题优先直接给结论与行动建议，不要强行扩展成长文。\n"
-                "- 外部学术文献仅在必要时使用；若本轮未使用外部文献，不要输出[文献#]。\n\n"
-                "【身份披露与术语约束（严格执行）】\n"
-                "- 禁止使用“Mamba”、“Transformer”、“Score”、“算法得分”、“模型预测值”等底层技术术语。\n"
-                "- 禁止输出小数点后超过2位的数值评分（如 4.0534），改用“高风险”、“中等风险”等定性描述。\n"
-                "- 若系统提示 risk_level=high，必须在回答结尾增加一句基于循证医学的安抚或积极引导（如“规范治疗可有效控制...”）。\n\n"
-                "【输出要求】\n"
-                "- 语气：专业、稳重、同理但不夸张。像一位经验丰富的临床医生在与患者沟通。\n"
-                "- 长度：优先短而有用；复杂问题才展开。\n"
-                "- 若涉及可能危及生命的情况，必须明确写出“建议立刻急诊/拨打当地急救电话”的触发条件。\n\n"
-                "【身份披露约束】\n"
-                "- 禁止透露底层模型名称、供应商、版本号、API信息或系统配置。\n"
-                "- 若用户询问“你是什么模型”，仅回答“我是医疗助手”。\n\n"
-                "【引用规则（系统强制）】\n"
-                "- 当使用参考资料时，请在对应句末添加[证据#序号]，序号对应参考资料出现顺序（从1开始）。\n"
-                "- 如使用外部文献，请添加[文献#序号]。\n"
-                "- 引用外部文献时，明确文献类型（临床试验/系统综述/指南/观察性研究）。"
-            ),
-        },
-        {
-            "role": "system",
-            "content": (
-                f"患者时序状态({TIMELINE_ENCODER} 编码): "
-                f"risk_level={timeline_state.get('risk_level')} "
-                f"risk_score={timeline_state.get('risk_score')} "
-                f"event_count={int(float(timeline_state.get('event_count', 0.0)))}\n"
-                f"检索路由建议: {retrieval_hint}\n"
-                f"病程摘要:\n{timeline_summary}"
-            ),
-        },
-        {
-            "role": "system",
-            "content": (
-                f"推理模式: {reasoning_mode}。"
-                "quick模式要求：简洁直答，3-6句，先给结论与下一步行动，不做冗长展开；"
-                "deep模式要求：可做结构化分析并给出关键证据。"
-            ),
-        },
-        {"role": "system", "content": f"参考资料:\n{context}"},
-        {"role": "system", "content": f"外部学术文献:\n{literature_context}"},
-    ]
-    for msg in payload.history[-8:]:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if role in {"system", "user", "assistant"} and content:
-            messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": payload.message})
+        next_keywords = _extract_retrieval_keywords(payload.message, max_terms=5)
+        citation_warning = ""
+        style_hint = _build_response_style_hint(payload.message, reasoning_mode, payload.history)
 
-    resp = client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=messages,
-        temperature=0.2,
-    )
-    answer = _sanitize_model_disclosure(resp.choices[0].message.content or "暂无回复")
-    ranked_sources = []
-    for rank, (score, chunk) in enumerate(all_scored, start=1):
-        source_type = "internal" if str(chunk.source).startswith("internal/") else "session"
-        layer = str(getattr(chunk, "layer", "L2"))
-        evidence = _build_evidence_snippet(str(chunk.text), payload.message)
-        item = {
-            "rank": rank,
-            "score": round(float(score), 4),
-            "chunk_id": chunk.id,
-            "source": _format_source(chunk.source),
-            "source_raw": chunk.source,
-            "type": source_type,
-            "layer": layer,
-            "title": str(getattr(chunk, "title", "") or ""),
-            "page": _extract_page_from_text(chunk.text),
-            "section": _extract_section_from_text(chunk.text),
-            "text_length": len(chunk.text),
-            "preview": chunk.text[:220],
-            "evidence": evidence,
-        }
-        ranked_sources.append(item)
-
-    def _evaluate_answer(candidate: str) -> tuple[list[dict[str, Any]], str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
-        candidate_sources, candidate_warning = _apply_citation_projection(candidate, ranked_sources)
-        candidate_evidence_guard = verify_answer_with_evidence(
-            candidate,
-            ranked_sources,
-            embed_similarity_fn=_embed_with_cache,
-        ).as_dict()
-        candidate_literature_guard = verify_literature_citations(
-            candidate,
-            external_literature,
-            embed_fn=_embed_with_cache if external_literature else None,
-        )
-        candidate_conclusions = _extract_key_conclusions(candidate_evidence_guard, max_items=4)
-        return (
-            candidate_sources,
-            candidate_warning,
-            candidate_evidence_guard,
-            candidate_literature_guard,
-            candidate_conclusions,
-        )
-
-    (
-        sources,
-        citation_warning,
-        evidence_guard,
-        literature_guard,
-        key_conclusions,
-    ) = _evaluate_answer(answer)
-
-    # --- Conflict detection between internal guidelines and external literature ---
-    evidence_conflicts: list[dict[str, str]] = []
-    if external_literature and ranked_sources:
-        internal_evidence = [
-            s for s in ranked_sources if s.get("type") == "internal"
-        ]
-        if internal_evidence and len(external_literature) > 0:
-            try:
-                for ie in internal_evidence[:3]:
-                    ie_text = str(ie.get("evidence", ""))
-                    if not ie_text:
-                        continue
-                    ie_vec = _embed_with_cache(ie_text)
-                    for idx, lit in enumerate(external_literature[:3]):
-                        lit_text = f"{lit.get('title', '')}. {lit.get('abstract', '')}"
-                        if not lit_text.strip():
-                            continue
-                        lit_vec = _embed_with_cache(lit_text)
-                        # Compute cosine similarity.
-                        ie_arr = np.array(ie_vec, dtype=np.float32)
-                        lit_arr = np.array(lit_vec, dtype=np.float32)
-                        denom = np.linalg.norm(ie_arr) * np.linalg.norm(lit_arr)
-                        sim = float(np.dot(ie_arr, lit_arr) / max(denom, 1e-8)) if denom > 1e-8 else 0.0
-                        # Related content (> 0.3) but not well-aligned (< 0.7) suggests potential conflict.
-                        if 0.3 < sim < 0.7:
-                            evidence_conflicts.append({
-                                "internal_source": str(ie.get("source", "")),
-                                "literature_ref": f"[文献#{idx+1}] {lit.get('title', '')}",
-                                "similarity": round(sim, 3),
-                                "warning": "内部指南与外部文献在此主题上可能存在差异，请结合最新证据综合判断。",
-                            })
-            except Exception:
-                pass  # conflict detection is best-effort
-
-    auto_rewrite_applied = False
-    rewrite_triggered = False
-    rewrite_rounds = 0
-    _MAX_REWRITE_ROUNDS = max(int(os.getenv("MAX_REWRITE_ROUNDS", "2")), 1)
-    if AUTO_EVIDENCE_REWRITE and reasoning_mode == "deep":
-        current_coverage = float(evidence_guard.get("coverage", 1.0) or 0.0)
-        current_unsupported = int(evidence_guard.get("unsupported_claims", 0) or 0)
-        rewrite_triggered = (
-            current_coverage < EVIDENCE_REWRITE_MIN_COVERAGE
-            or current_unsupported > EVIDENCE_REWRITE_MAX_UNSUPPORTED
-        )
-        while rewrite_triggered and ranked_sources and rewrite_rounds < _MAX_REWRITE_ROUNDS:
-            rewrite_rounds += 1
-            evidence_lines = []
-            for item in ranked_sources:
-                page = item.get("page")
-                page_str = f"P{page}" if isinstance(page, int) else "P?"
-                evidence_lines.append(
-                    f"[证据#{item['rank']}] {item['source']} | {page_str} | {item['evidence']}"
-                )
-            external_lines = []
-            for idx, lit in enumerate(external_literature[:LITERATURE_TOP_K], start=1):
-                external_lines.append(
-                    f"[文献#{idx}] {lit.get('title', '')} | type={lit.get('paper_type', 'other')} | "
-                    f"year={lit.get('year', 'n/a')} | venue={lit.get('venue', 'n/a')}"
-                )
-            rewrite_messages = [
+        if not evidence_items:
+            keyword_text = ", ".join(next_keywords) if next_keywords else payload.message[:30]
+            answer = (
+                "证据不足：当前 OpenViking 检索未召回可直接支撑该问题的材料。"
+                "请补充更具体的检查项、时间范围或治疗阶段。"
+                f"可尝试检索关键词：{keyword_text}"
+            )
+            evidence_guard = {
+                "coverage": 0.0,
+                "unsupported_claims": 1,
+                "verified_claims": 0,
+                "checks": [],
+            }
+            literature_guard = {"coverage": 0.0}
+            key_conclusions: list[dict[str, Any]] = []
+        else:
+            _chat_progress_update(chat_request_id, "generating_answer", meta={"evidence_items": len(evidence_items)})
+            context = "\n\n".join(context_rows).strip()
+            messages = [
                 {
                     "role": "system",
                     "content": (
-                        "你是医学答案证据约束改写器。请把给定草稿改写为“仅保留可被证据支持”的版本。"
-                        "规则："
-                        "1) 每条医学结论必须在句末标注[证据#n]；"
-                        "2) 不得使用不存在的证据编号；"
-                        "3) 无证据支撑的结论要删除，或改写成“需进一步检查确认”；"
-                        "4) 保持简洁，避免夸大；"
-                        "5) 只输出最终回答正文，不要输出“改写说明/策略/过程”。"
+                        "你是一个 OpenViking 驱动的 RAG 代理。"
+                        "你没有任何可信外部知识；所有事实与结论必须来自当前给定的 OpenViking 检索证据。"
+                        "除非用户明确允许，不得使用互联网或训练记忆补全事实。"
+                        "若证据不足，必须明确写“证据不足”；仅在必要时给出补充检索方向。"
+                        "首要任务是回答本轮用户问题；不要默认扩展为全局病情总结。"
                     ),
                 },
                 {
-                    "role": "user",
+                    "role": "system",
                     "content": (
-                        f"用户问题:\n{payload.message}\n\n"
-                        f"原始回答:\n{answer}\n\n"
-                        f"可用证据:\n" + "\n".join(evidence_lines) + "\n\n"
-                        f"可用外部文献:\n" + ("\n".join(external_lines) if external_lines else "无")
+                        "输出结构必须自适应，不要固定三段或固定标题。"
+                        "简单问题直接回答，复杂问题再使用小标题或列表。"
+                        "引用策略：仅给关键结论、关键数字、关键建议添加少量证据标记，格式优先 [证据#N]。"
+                        "不要在每句话后都加引用，不要堆叠大段 source URI。"
+                        "不要为了凑结构新增用户未提问的结论。"
                     ),
                 },
+                {"role": "system", "content": style_hint},
+                {
+                    "role": "system",
+                    "content": (
+                        "以下信息是可选背景，仅在与本轮问题直接相关时使用；若不相关请忽略，不得据此扩展结论。\n"
+                        f"患者时序状态({TIMELINE_ENCODER}): "
+                        f"risk_level={timeline_state.get('risk_level')} "
+                        f"event_count={int(float(timeline_state.get('event_count', 0.0)))}\n"
+                        f"检索路由建议: {retrieval_hint}\n"
+                        f"病程摘要:\n{timeline_summary}"
+                    ),
+                },
+                {
+                    "role": "system",
+                    "content": (
+                        "若用户问题过短、存在多种解释或缺少对象，请先给出一句澄清问题，"
+                        "并提供最多3个可选理解方向；在澄清前不要做全面展开。"
+                    ),
+                },
+                {"role": "system", "content": f"OpenViking 检索证据（仅可依据以下内容回答）:\n{context}"},
             ]
-            rewrite_resp = client.chat.completions.create(
-                model=CHAT_MODEL,
-                messages=rewrite_messages,
-                temperature=0.0,
-            )
-            rewritten_answer = _sanitize_model_disclosure(rewrite_resp.choices[0].message.content or answer)
-            (
-                rewritten_sources,
-                rewritten_warning,
-                rewritten_evidence_guard,
-                rewritten_literature_guard,
-                rewritten_key_conclusions,
-            ) = _evaluate_answer(rewritten_answer)
+            for msg in payload.history[-8:]:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role in {"user", "assistant"} and content:
+                    messages.append({"role": role, "content": content})
+            messages.append({"role": "user", "content": payload.message})
 
-            rewritten_coverage = float(rewritten_evidence_guard.get("coverage", 0.0) or 0.0)
-            rewritten_unsupported = int(rewritten_evidence_guard.get("unsupported_claims", 999) or 999)
-            if (
-                rewritten_coverage > current_coverage
-                or (
-                    rewritten_coverage >= current_coverage
-                    and rewritten_unsupported < current_unsupported
-                )
-            ):
-                answer = rewritten_answer
-                sources = rewritten_sources
-                citation_warning = rewritten_warning
-                evidence_guard = rewritten_evidence_guard
-                literature_guard = rewritten_literature_guard
-                key_conclusions = rewritten_key_conclusions
-                auto_rewrite_applied = True
-                current_coverage = rewritten_coverage
-                current_unsupported = rewritten_unsupported
-            else:
-                break  # no improvement, stop iterating
-            # Check if we've met the target.
-            if (
-                current_coverage >= EVIDENCE_REWRITE_MIN_COVERAGE
-                and current_unsupported <= EVIDENCE_REWRITE_MAX_UNSUPPORTED
-            ):
-                break
-    audit_logger.log(
-        event_type="chat_completed",
-        session_id=session_id,
-        details={
-            "query_length": len(payload.message),
-            "retrieved_internal": len(internal_scored),
-            "retrieved_session": len(session_scored),
-            "returned_sources": len(sources),
-            "external_literature": len(external_literature),
-            "external_literature_enabled": use_external_literature,
-            "reasoning_mode": reasoning_mode,
-            "reasoning_meta": reasoning_meta,
-            "timeline_events": len(timeline_events),
-            "openviking_trace": openviking_trace,
-            "evidence_coverage": evidence_guard.get("coverage", 0),
-            "literature_coverage": literature_guard.get("coverage", 0),
-            "rewrite_triggered": rewrite_triggered,
-            "auto_rewrite_applied": auto_rewrite_applied,
-        },
-    )
-    return JSONResponse(
-        {
-            "answer": answer,
-            "sources": sources,
-            "timeline_state": timeline_state,
-            "timeline_summary": timeline_summary,
-            "retrieval_hint": retrieval_hint,
-            "evidence_guard": evidence_guard,
-            "citation_warning": citation_warning,
-            "key_conclusions": key_conclusions,
-            "external_sources": external_literature,
-            "external_literature_enabled": use_external_literature,
-            "reasoning_mode": reasoning_mode,
-            "reasoning_meta": reasoning_meta,
-            "openviking_trace": openviking_trace,
-            "literature_guard": literature_guard,
-            "auto_rewrite_applied": auto_rewrite_applied,
-            "rewrite_triggered": rewrite_triggered,
-            "rewrite_rounds": rewrite_rounds,
-            "evidence_conflicts": evidence_conflicts,
-        }
-    )
+            resp = client.chat.completions.create(
+                model=CHAT_MODEL,
+                messages=messages,
+                temperature=0.1,
+                timeout=CHAT_COMPLETION_TIMEOUT_SECONDS,
+            )
+            answer = _sanitize_model_disclosure(resp.choices[0].message.content or "暂无回复")
+            answer = _normalize_answer_citations(answer, ranked_sources)
+            cited_sources = _extract_source_citations(answer)
+            cited_ranks = _extract_evidence_ranks(answer)
+            if not cited_sources and not cited_ranks:
+                citation_warning = "回答未显式标注证据，已附加关键证据编号索引。"
+                rank_refs = [f"[证据#{int(item.get('rank', 0) or 0)}]" for item in ranked_sources[:3] if int(item.get("rank", 0) or 0) > 0]
+                if rank_refs:
+                    answer = f"{answer.rstrip()}\n\n参考来源：{' '.join(rank_refs)}（详见下方证据卡片）"
+
+            _chat_progress_update(chat_request_id, "validating_evidence")
+            evidence_guard = _build_openviking_evidence_guard(answer, evidence_items)
+            literature_guard = {"coverage": 0.0}
+            key_conclusions = []
+
+        audit_logger.log(
+            event_type="chat_completed",
+            session_id=progress_session_id,
+            details={
+                "query_length": len(payload.message),
+                "retrieved_viking_hits": len(all_hits),
+                "returned_sources": len(ranked_sources),
+                "reasoning_mode": reasoning_mode,
+                "reasoning_meta": reasoning_meta,
+                "timeline_events": len(timeline_events),
+                "openviking_trace": openviking_trace,
+                "evidence_coverage": evidence_guard.get("coverage", 0),
+            },
+        )
+
+        _chat_progress_complete(
+            chat_request_id,
+            meta={
+                "retrieved_hits": len(all_hits),
+                "evidence_items": len(evidence_items),
+                "returned_sources": len(ranked_sources),
+                "evidence_coverage": float(evidence_guard.get("coverage", 0.0) or 0.0),
+            },
+        )
+
+        return JSONResponse(
+            {
+                "answer": answer,
+                "sources": ranked_sources,
+                "timeline_state": timeline_state,
+                "timeline_summary": timeline_summary,
+                "retrieval_hint": retrieval_hint,
+                "evidence_guard": evidence_guard,
+                "citation_warning": citation_warning,
+                "key_conclusions": key_conclusions,
+                "external_sources": [],
+                "external_literature_enabled": False,
+                "reasoning_mode": reasoning_mode,
+                "reasoning_meta": reasoning_meta,
+                "openviking_trace": openviking_trace,
+                "literature_guard": literature_guard,
+                "auto_rewrite_applied": False,
+                "rewrite_triggered": False,
+                "rewrite_rounds": 0,
+                "evidence_conflicts": [],
+                "chat_request_id": chat_request_id,
+            }
+        )
+    except Exception as exc:
+        _chat_progress_fail(chat_request_id, str(exc))
+        raise
 
 
 @app.get("/api/session/timeline")

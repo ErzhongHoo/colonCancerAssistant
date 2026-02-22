@@ -4,11 +4,18 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-data/
+*.swp
+*.swo
+
+# Ignore runtime data by default.
+data/*
 .env
 .env.*
 !.env.example
 .DS_Store
+
+# Keep only data directory skeleton and guideline readme tracked.
 !data/
 !data/guidelines/
+data/guidelines/*
 !data/guidelines/README_BREAST.md

@@ -32,13 +32,15 @@ uv run --python .venv/bin/python uvicorn app.main:app --reload --port 8000
 
 - 内部 RAG（持久化）：指南/共识文档入库后长期保存
 - 外部 RAG（临时会话）：用户上传 PDF / 图片 / txt 报告，仅当前页面会话有效
+- 对话检索链路已切换为 **OpenViking-only**：回答前必须先 `search/find`，并仅基于 OpenViking 证据作答
 - 外部上传自动脱敏（手机号/身份证号/邮箱/银行卡/姓名字段/地址字段）
 - 自动抽取文本（图片走多模态模型 OCR 提取；扫描版 PDF 会自动 OCR 兜底）
 - 文本切片 + Embedding + 向量检索（向量库抽象层，当前默认 `local_json`）
 - ChatGPT 风格单页对话
-- 回答时附带引用证据（来源、rank、相似度 score、chunk_id、证据摘录）
+- 回答采用“关键主张引用”策略：仅在关键结论/关键数字处标注少量证据（如 `[证据#1]`），详细来源在证据卡片查看
+- 回答结构按问题复杂度自适应（简单问题直答，复杂问题再结构化），不固定“三段式”模板
 - 患者病程时间线抽取与线性状态编码（`risk_level/risk_score`）
-- Claim 级证据约束校验（引用完整性 + 语义重叠）
+- 证据不足时会明确说明“证据不足”，并在必要时给出补充检索关键词
 - 隐私审计日志（上传处理、聊天检索、TTL 过期销毁证明）
 
 ## 5. 挑战杯增强点（可演示实物）
@@ -47,7 +49,7 @@ uv run --python .venv/bin/python uvicorn app.main:app --reload --port 8000
   - 上传病例后自动抽取病程事件（检验、分期、治疗事件）
   - 通过线性状态编码聚合风险，驱动检索路由提示
 - 因果/证据约束推理（工程版）：
-  - 每条医疗结论应绑定 `[证据#n]`
+  - 关键结论应绑定证据编号（如 `[证据#1]`），并可映射到下方可展开证据片段
   - 服务端返回 `evidence_guard` 结果（`coverage`、`verified_claims`、`unsupported_claims`）
 - 隐私沙箱可验证闭环：
   - 会话隔离、TTL 到期自动清理
@@ -84,11 +86,11 @@ curl -X POST "http://127.0.0.1:8000/api/internal/import-guidelines" \
   - 返回 TTL 过期清理证明事件
 - `POST /api/chat`
   - 额外返回 `timeline_state`、`timeline_summary`、`retrieval_hint`、`evidence_guard`
-  - 当证据覆盖率过低时会自动触发二次改写（仅保留可证结论）
+  - 当证据不足时会明确返回“证据不足”并给出下一步检索关键词
 
 ## 8. 关键配置
 
-- `VECTOR_BACKEND=local_json`：向量库后端（已抽象，当前实现为本地 JSON）
+- `VECTOR_BACKEND=local_json`：用于上传切片缓存（对话检索主链路已改为 OpenViking）
 - `ENABLE_UPLOAD_DEID=true`：是否对外部用户上传文本先脱敏再入库
 - `OCR_PROVIDER=auto|paddle|vision`：OCR 引擎选择（默认 `auto`，先 PaddleOCR 再回退视觉模型）
 - `PADDLE_OCR_LANG=ch`：PaddleOCR 语言包
@@ -109,12 +111,17 @@ curl -X POST "http://127.0.0.1:8000/api/internal/import-guidelines" \
 - `LITERATURE_TIMEOUT_SECONDS=8`：联网检索超时时间（秒）
 - `LITERATURE_MEDICAL_ONCOLOGY_ONLY=true`：仅保留医学肿瘤文献
 - `LITERATURE_MIN_RELEVANCE=0.18`：最低相关性阈值（低于阈值直接丢弃）
-- `AUTO_EVIDENCE_REWRITE=true`：低充分度时自动二次改写答案
-- `EVIDENCE_REWRITE_MIN_COVERAGE=0.75`：触发改写的最低证据覆盖率阈值
-- `EVIDENCE_REWRITE_MAX_UNSUPPORTED=1`：触发改写的最大不支持结论阈值
+- `AUTO_EVIDENCE_REWRITE=true`：旧链路参数（OpenViking-only 对话路径下不生效）
+- `EVIDENCE_REWRITE_MIN_COVERAGE=0.75`：旧链路参数（OpenViking-only 对话路径下不生效）
+- `EVIDENCE_REWRITE_MAX_UNSUPPORTED=1`：旧链路参数（OpenViking-only 对话路径下不生效）
 - `OPENVIKING_NATIVE_ENABLED=true`：启用官方 OpenViking SDK 作为分层检索主通道（异常时自动回退本地实现）
 - `OPENVIKING_NATIVE_STORAGE_PATH=./data/openviking_native`：官方 OpenViking 本地存储目录
 - `OPENVIKING_NATIVE_AGFS_PORT=1833`：官方 OpenViking 内嵌 AGFS 端口（多实例部署时需错开）
+- `OPENVIKING_LEGACY_DUAL_WRITE=false`：是否同时写入 `openviking_layers.json`（默认关闭以减少重复存储；native 失败时仍会自动回退写入）
+- `OPENVIKING_RAG_L1_BUDGET=6`：默认最多读取 L1 概览数量
+- `OPENVIKING_RAG_L2_BUDGET=2`：默认最多读取 L2 原文数量
+- `OPENVIKING_RAG_DEEP_L1_BUDGET=10`：用户要求深入时的 L1 预算
+- `OPENVIKING_RAG_DEEP_L2_BUDGET=4`：用户要求深入时的 L2 预算
 - `JWT_SECRET=<your_secret>`：JWT 签名密钥（详见下方认证章节）
 - `JWT_EXPIRE_SECONDS=604800`：JWT 令牌过期时间（默认 7 天）
 
@@ -177,6 +184,7 @@ JWT_EXPIRE_SECONDS=604800
 | `/api/auth/login` | POST | 用户登录，返回 JWT 令牌 |
 | `/api/auth/logout` | POST | 登出（客户端清除令牌即可） |
 | `/api/auth/me` | GET | 获取当前登录用户信息和数据统计 |
+| `/api/user/change-username` | POST | 修改当前登录用户的用户名 |
 | `/api/user/delete-data` | POST | 清除当前用户的所有上传数据 |
 | `/api/user/delete-account` | POST | 注销账户（永久删除） |
 | `/api/user/delete-upload` | POST | 删除指定上传文件的数据 |

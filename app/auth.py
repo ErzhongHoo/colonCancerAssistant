@@ -122,6 +122,21 @@ class UserManager:
         if not json_path.exists():
             return
 
+        # Guard: some old deployments accidentally left a SQLite file named users.json.
+        try:
+            header = json_path.read_bytes()[:16]
+            if header.startswith(b"SQLite format 3"):
+                backup = json_path.with_suffix(".json.sqlite_legacy")
+                index = 1
+                while backup.exists():
+                    backup = json_path.with_suffix(f".json.sqlite_legacy.{index}")
+                    index += 1
+                json_path.rename(backup)
+                print(f"[auth] Found SQLite users.json, moved to {backup.name}")
+                return
+        except Exception:
+            pass
+
         try:
             raw = json.loads(json_path.read_text(encoding="utf-8"))
             users = raw.get("users", [])
@@ -195,15 +210,24 @@ class UserManager:
         finally:
             conn.close()
 
+    def _normalize_username(self, username: str) -> str:
+        return (username or "").strip().lower()
+
+    def _validate_username(self, username: str) -> str | None:
+        if not username or len(username) < 2:
+            return "用户名至少需要2个字符"
+        if len(username) > 30:
+            return "用户名不能超过30个字符"
+        return None
+
     # ── Registration ─────────────────────────────────────────────────────
 
     def register(self, username: str, password: str, display_name: str = "") -> tuple[bool, str]:
         """Register a new user. Returns (success, message_or_token)."""
-        username = username.strip().lower()
-        if not username or len(username) < 2:
-            return False, "用户名至少需要2个字符"
-        if len(username) > 30:
-            return False, "用户名不能超过30个字符"
+        username = self._normalize_username(username)
+        username_error = self._validate_username(username)
+        if username_error:
+            return False, username_error
         if not password or len(password) < 4:
             return False, "密码至少需要4个字符"
 
@@ -241,7 +265,7 @@ class UserManager:
 
     def login(self, username: str, password: str) -> tuple[bool, str]:
         """Login a user. Returns (success, message_or_token)."""
-        username = username.strip().lower()
+        username = self._normalize_username(username)
         user = self._get_user_by_username(username)
         if not user:
             return False, "用户名或密码错误"
@@ -263,6 +287,45 @@ class UserManager:
 
         token = self._generate_token(user.user_id)
         return True, token
+
+    def change_username(self, user_id: str, new_username: str) -> tuple[bool, str]:
+        """Change username for the given user_id."""
+        user = self._get_user_by_id(user_id)
+        if not user:
+            return False, "用户不存在"
+
+        new_username = self._normalize_username(new_username)
+        username_error = self._validate_username(new_username)
+        if username_error:
+            return False, username_error
+        if new_username == user.username:
+            return False, "新用户名不能与当前用户名相同"
+
+        existing = self._get_user_by_username(new_username)
+        if existing and existing.user_id != user_id:
+            return False, "该用户名已被注册"
+
+        # Keep customized display_name unchanged; only sync when it tracked username.
+        old_username = user.username
+        should_sync_display_name = (
+            not user.display_name
+            or self._normalize_username(user.display_name) == old_username
+        )
+        next_display_name = new_username if should_sync_display_name else user.display_name
+
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE users SET username = ?, display_name = ? WHERE user_id = ?",
+                (new_username, next_display_name, user_id),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return False, "该用户名已被注册"
+        finally:
+            conn.close()
+
+        return True, "ok"
 
     # ── Logout (JWT is stateless – client just discards the token) ────────
 

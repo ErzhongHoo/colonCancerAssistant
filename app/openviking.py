@@ -180,6 +180,10 @@ class OpenVikingStore:
     def _native_base_uri(self) -> str:
         return f"viking://resources/{self.namespace}"
 
+    @property
+    def base_uri(self) -> str:
+        return self._native_base_uri
+
     def _native_target_uri(self, source: str) -> str:
         return f"{self._native_base_uri}/{self._source_slug(source)}"
 
@@ -371,6 +375,7 @@ class OpenVikingStore:
         source: str,
         l0_text: str,
         l1_items: list[dict[str, Any]],
+        l2_texts: list[str] | None = None,
     ) -> dict[str, int]:
         if self._native_client is None:
             return {"l0": 0, "l1": 0}
@@ -396,6 +401,15 @@ class OpenVikingStore:
                 lines.append(f"### {header}")
                 lines.append(summary)
                 lines.append("")
+        lines.append("## L2")
+        l2_clean = [str(x).strip() for x in (l2_texts or []) if str(x).strip()]
+        if not l2_clean:
+            lines.append("- No source chunks.")
+        else:
+            for idx, text in enumerate(l2_clean, start=1):
+                lines.append(f"### Chunk {idx}")
+                lines.append(text)
+                lines.append("")
         payload = "\n".join(lines).strip() + "\n"
 
         fd, tmp_name = tempfile.mkstemp(suffix=".md", prefix="openviking_")
@@ -416,6 +430,7 @@ class OpenVikingStore:
                 "target_uri": target_uri,
                 "root_uri": root_uri,
                 "l1_count": len(l1_clean),
+                "l2_count": len(l2_clean),
                 "updated_at": time.time(),
             }
             self._persist_native_index()
@@ -432,16 +447,29 @@ class OpenVikingStore:
         l0_text: str,
         l1_items: list[dict[str, Any]],
         embed_fn: Callable[[str], list[float]],
+        l2_texts: list[str] | None = None,
     ) -> dict[str, int]:
-        legacy_stats = self._upsert_source_layers_legacy(source, l0_text, l1_items, embed_fn)
+        dual_write_legacy = _env_flag("OPENVIKING_LEGACY_DUAL_WRITE", "false")
+        legacy_stats = {"l0": 0, "l1": 0}
+        if dual_write_legacy:
+            legacy_stats = self._upsert_source_layers_legacy(source, l0_text, l1_items, embed_fn)
         if self._native_client is None:
+            if not dual_write_legacy:
+                return self._upsert_source_layers_legacy(source, l0_text, l1_items, embed_fn)
             return legacy_stats
         try:
-            native_stats = self._upsert_source_layers_native(source, l0_text, l1_items)
+            native_stats = self._upsert_source_layers_native(
+                source,
+                l0_text,
+                l1_items,
+                l2_texts=l2_texts,
+            )
             if int(native_stats.get("l0", 0)) > 0 or int(native_stats.get("l1", 0)) > 0:
                 return native_stats
         except Exception:  # pragma: no cover - native path is best effort
             pass
+        if not dual_write_legacy:
+            return self._upsert_source_layers_legacy(source, l0_text, l1_items, embed_fn)
         return legacy_stats
 
     def list_by_layer(self, layer: str) -> list[LayerItem]:
@@ -559,6 +587,148 @@ class OpenVikingStore:
             if self._uri_matches_prefix(uri, self._native_base_uri) or self._native_match_source(uri):
                 out.append(ctx)
         return out
+
+    @staticmethod
+    def _ctx_attr(ctx: Any, key: str, default: Any = "") -> Any:
+        if isinstance(ctx, dict):
+            return ctx.get(key, default)
+        return getattr(ctx, key, default)
+
+    def _normalize_resources(self, result: Any) -> list[dict[str, Any]]:
+        resources = []
+        if isinstance(result, dict):
+            resources = result.get("resources") or result.get("items") or []
+        else:
+            resources = list(getattr(result, "resources", []) or [])
+        out: list[dict[str, Any]] = []
+        for ctx in resources:
+            uri = str(self._ctx_attr(ctx, "uri", "") or "")
+            if not uri:
+                continue
+            if not self._uri_matches_prefix(uri, self._native_base_uri) and not self._native_match_source(uri):
+                continue
+            out.append(
+                {
+                    "uri": uri,
+                    "score": float(self._ctx_attr(ctx, "score", 0.0) or 0.0),
+                    "is_leaf": bool(self._ctx_attr(ctx, "is_leaf", False)),
+                    "abstract": str(self._ctx_attr(ctx, "abstract", "") or "").strip(),
+                    "overview": str(self._ctx_attr(ctx, "overview", "") or "").strip(),
+                }
+            )
+        return out
+
+    def session(self, session_id: str | None = None) -> Any | None:
+        if self._native_client is None:
+            return None
+        try:
+            return self._native_client.session(session_id=session_id)
+        except Exception:
+            return None
+
+    def wait_processed(self, timeout: float | None = None) -> dict[str, Any]:
+        if self._native_client is None:
+            return {"ok": False, "reason": "native_unavailable"}
+        try:
+            out = self._native_client.wait_processed(timeout=timeout)
+            if isinstance(out, dict):
+                return out
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    def find(
+        self,
+        query: str,
+        target_uri: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        if self._native_client is None:
+            return []
+        try:
+            result = self._native_client.find(
+                query=str(query or ""),
+                target_uri=str(target_uri or self._native_base_uri),
+                limit=max(int(limit), 1),
+            )
+        except Exception:
+            return []
+        return self._normalize_resources(result)
+
+    def search(
+        self,
+        query: str,
+        target_uri: str | None = None,
+        session: Any | None = None,
+        filters: dict[str, Any] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        if self._native_client is None:
+            return []
+        kwargs: dict[str, Any] = {
+            "query": str(query or ""),
+            "target_uri": str(target_uri or self._native_base_uri),
+            "limit": max(int(limit), 1),
+        }
+        if session is not None:
+            kwargs["session"] = session
+        if filters:
+            kwargs["filter"] = filters
+        try:
+            result = self._native_client.search(**kwargs)
+        except Exception:
+            # Best-effort fallback: semantic find without multi-step planning.
+            return self.find(query=query, target_uri=target_uri, limit=limit)
+        return self._normalize_resources(result)
+
+    def overview(self, uri: str) -> str:
+        if self._native_client is None:
+            return ""
+        try:
+            text = self._native_client.overview(str(uri or ""))
+            return str(text or "").strip()
+        except Exception:
+            return ""
+
+    def read(self, uri: str) -> str:
+        if self._native_client is None:
+            return ""
+        try:
+            text = self._native_client.read(str(uri or ""))
+            return str(text or "").strip()
+        except Exception:
+            return ""
+
+    def ls(self, uri: str) -> list[dict[str, Any]]:
+        if self._native_client is None:
+            return []
+        try:
+            rows = self._native_client.ls(str(uri or ""))
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in list(rows or []):
+            if isinstance(row, dict):
+                ru = str(row.get("uri", "") or row.get("path", "")).strip()
+                out.append({"uri": ru, "is_leaf": bool(row.get("is_leaf", False)), "raw": row})
+                continue
+            ru = str(getattr(row, "uri", "") or getattr(row, "path", "") or "").strip()
+            out.append({"uri": ru, "is_leaf": bool(getattr(row, "is_leaf", False)), "raw": row})
+        return [x for x in out if x.get("uri")]
+
+    def glob(self, pattern: str, root_uri: str | None = None) -> list[str]:
+        if self._native_client is None:
+            return []
+        try:
+            out = self._native_client.glob(str(pattern or ""), uri=str(root_uri or self._native_base_uri))
+        except Exception:
+            return []
+        if isinstance(out, dict):
+            rows = out.get("matches") or out.get("uris") or out.get("items") or []
+            return [str(x).strip() for x in rows if str(x).strip()]
+        if isinstance(out, list):
+            return [str(x).strip() for x in out if str(x).strip()]
+        return []
 
     def _native_directory_text(self, uri: str, abstract: str, overview: str) -> str:
         if overview:

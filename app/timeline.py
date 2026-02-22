@@ -527,7 +527,7 @@ def build_retrieval_hint(
     state = state or linear_state_encode(events)
     risk = state.get("risk_level", "low")
     q = question.lower()
-    if "分期" in question or "stage" in q:
+    if "分期" in question or "stage" in q or "tnm" in q or "ctnm" in q:
         return "优先召回病理分期、影像分期和TNM相关指南。"
     if "化疗" in question or "靶向" in question or "免疫" in question:
         return "优先召回治疗路径、适应证、禁忌证和不良反应管理。"
