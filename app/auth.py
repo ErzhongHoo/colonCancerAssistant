@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import sqlite3
 import time
 from dataclasses import asdict, dataclass, field
@@ -378,12 +379,16 @@ class UserManager:
         """Delete all uploaded data for a user (vector store + timeline)."""
         user_dir = self.user_data_root / user_id
         deleted_files = 0
+        deleted_dirs = 0
         if user_dir.exists():
             for f in user_dir.iterdir():
                 if f.is_file():
                     f.unlink()
                     deleted_files += 1
-        return {"deleted_files": deleted_files, "user_id": user_id}
+                elif f.is_dir():
+                    shutil.rmtree(f, ignore_errors=True)
+                    deleted_dirs += 1
+        return {"deleted_files": deleted_files, "deleted_dirs": deleted_dirs, "user_id": user_id}
 
     def delete_account(self, username: str) -> bool:
         """Delete a user account and all associated data."""

@@ -204,6 +204,20 @@ class OpenVikingStore:
                     best_len = len(root)
         return best_source
 
+    def resolve_source(self, uri: str) -> str:
+        """Best-effort map from native/legacy URI to original source key."""
+        value = str(uri or "").strip()
+        if not value:
+            return ""
+        matched = self._native_match_source(value)
+        if matched:
+            return matched
+        # Legacy fallback: "<source>::L1::..." or "<source>::L0"
+        legacy = re.match(r"^(.*?)::L[01](?:::.*)?$", value)
+        if legacy:
+            return str(legacy.group(1) or "").strip()
+        return ""
+
     def _load(self) -> None:
         if self.db_path is None or not self.db_path.exists():
             return

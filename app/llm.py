@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 from pathlib import Path
 
 from openai import OpenAI
@@ -97,6 +98,85 @@ def ocr_with_vision_bytes_transcribe(
         data_url,
         "请逐行转写图片中的全部可见中文/英文文字，保持原文含义，不要总结，不要改写，不要补充解释。",
     )
+
+
+def ocr_with_aliyun_ocr_bytes(
+    client: OpenAI,
+    model: str,
+    image_bytes: bytes,
+    mime_type: str = "image/png",
+    prompt_text: str | None = None,
+    min_pixels: int = 3072,
+    max_pixels: int = 8_388_608,
+) -> str:
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{mime_type};base64,{encoded}"
+    def _build_content(text_prompt: str | None) -> list[dict[str, object]]:
+        image_item: dict[str, object] = {
+            "type": "image_url",
+            "image_url": {"url": data_url},
+        }
+        if min_pixels > 0:
+            image_item["min_pixels"] = int(min_pixels)
+        if max_pixels > 0:
+            image_item["max_pixels"] = int(max_pixels)
+        content: list[dict[str, object]] = [image_item]
+        if text_prompt and text_prompt.strip():
+            content.append({"type": "text", "text": text_prompt.strip()})
+        return content
+
+    def _call(text_prompt: str | None) -> str:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": _build_content(text_prompt)}],
+            temperature=0.1,
+        )
+        return _normalize_aliyun_ocr_text(resp.choices[0].message.content or "")
+
+    first = _call(prompt_text)
+    if not _is_coord_only_aliyun_output(first):
+        return first
+    retry_prompt = "请输出OCR文本内容。"
+    second = _call(retry_prompt)
+    if not _is_coord_only_aliyun_output(second):
+        return second
+    return first
+
+
+_COORD_NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
+
+
+def _normalize_aliyun_ocr_text(raw: str) -> str:
+    text = raw.strip()
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    cleaned: list[str] = []
+    hit_count = 0
+    for line in lines:
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 6:
+            continue
+        if all(_COORD_NUM_RE.match(part) for part in parts[:5]):
+            value = ",".join(parts[5:]).strip()
+            if value:
+                cleaned.append(value)
+                hit_count += 1
+    if hit_count > 0 and cleaned:
+        return "\n".join(cleaned).strip()
+    return text
+
+
+def _is_coord_only_aliyun_output(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    coord_lines = 0
+    for line in lines:
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) == 5 and all(_COORD_NUM_RE.match(part) for part in parts):
+            coord_lines += 1
+    return coord_lines == len(lines)
 
 
 def extract_date_with_vision_bytes(

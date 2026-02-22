@@ -34,7 +34,7 @@ uv run --python .venv/bin/python uvicorn app.main:app --reload --port 8000
 - 外部 RAG（临时会话）：用户上传 PDF / 图片 / txt 报告，仅当前页面会话有效
 - 对话检索链路已切换为 **OpenViking-only**：回答前必须先 `search/find`，并仅基于 OpenViking 证据作答
 - 外部上传自动脱敏（手机号/身份证号/邮箱/银行卡/姓名字段/地址字段）
-- 自动抽取文本（图片走多模态模型 OCR 提取；扫描版 PDF 会自动 OCR 兜底）
+- 自动抽取文本（图片支持本地 PaddleOCR / 百炼在线 OCR / 多模态视觉 OCR；扫描版 PDF 会自动 OCR 兜底）
 - 文本切片 + Embedding + 向量检索（向量库抽象层，当前默认 `local_json`）
 - ChatGPT 风格单页对话
 - 回答采用“关键主张引用”策略：仅在关键结论/关键数字处标注少量证据（如 `[证据#1]`），详细来源在证据卡片查看
@@ -80,6 +80,9 @@ curl -X POST "http://127.0.0.1:8000/api/internal/import-guidelines" \
 
 - `GET /api/session/timeline`
   - 返回当前会话病程事件、时序编码状态和摘要
+- `GET /api/upload/debug?source=<filename>&reextract=false`
+  - 返回某个上传源的原件保存状态、抽取文本片段、时间线事件、L1/L0（用于排查抽取偏差）
+  - 当 `reextract=true` 时会基于已保存原件重新抽取并对比当前入库文本
 - `GET /api/audit/recent?limit=50`
   - 返回最近审计日志
 - `GET /api/audit/ttl-proof?session_id=<id>`
@@ -92,8 +95,12 @@ curl -X POST "http://127.0.0.1:8000/api/internal/import-guidelines" \
 
 - `VECTOR_BACKEND=local_json`：用于上传切片缓存（对话检索主链路已改为 OpenViking）
 - `ENABLE_UPLOAD_DEID=true`：是否对外部用户上传文本先脱敏再入库
-- `OCR_PROVIDER=auto|paddle|vision`：OCR 引擎选择（默认 `auto`，先 PaddleOCR 再回退视觉模型）
+- `SAVE_UPLOAD_ORIGINALS=false`：是否落盘保存用户上传原件（用于抽取对照与审计排查）
+- `OCR_PROVIDER=auto|paddle|aliyun|vision`：OCR 引擎选择（默认 `auto`，顺序为 PaddleOCR -> 百炼在线 OCR -> 视觉模型）
 - `PADDLE_OCR_LANG=ch`：PaddleOCR 语言包
+- `ALIYUN_OCR_MODEL=qwen-vl-ocr-latest`：百炼在线 OCR 模型
+- `ALIYUN_OCR_MIN_PIXELS=3072`：在线 OCR 最小像素约束（0 表示不设置）
+- `ALIYUN_OCR_MAX_PIXELS=8388608`：在线 OCR 最大像素约束（0 表示不设置）
 - 内部指南导入会自动使用“逐字转写”OCR策略，避免被“检验项模板”误抽取
 - `PDF_OCR_MAX_PAGES=500`：扫描版 PDF 的 OCR 最大页数
 - `SESSION_TTL_SECONDS=1800`：用户会话临时库过期时间（秒，手动清除模式下仅保留配置）
@@ -122,6 +129,7 @@ curl -X POST "http://127.0.0.1:8000/api/internal/import-guidelines" \
 - `OPENVIKING_RAG_L2_BUDGET=2`：默认最多读取 L2 原文数量
 - `OPENVIKING_RAG_DEEP_L1_BUDGET=10`：用户要求深入时的 L1 预算
 - `OPENVIKING_RAG_DEEP_L2_BUDGET=4`：用户要求深入时的 L2 预算
+- `OPENVIKING_INTERNAL_COMPLEX_SEARCH=false`：内部库是否在复杂问题下启用 `search`（默认关闭，优先走更快的 `find` 以降低 `internal (1/2)` 等待时间）
 - `JWT_SECRET=<your_secret>`：JWT 签名密钥（详见下方认证章节）
 - `JWT_EXPIRE_SECONDS=604800`：JWT 令牌过期时间（默认 7 天）
 
@@ -188,6 +196,7 @@ JWT_EXPIRE_SECONDS=604800
 | `/api/user/delete-data` | POST | 清除当前用户的所有上传数据 |
 | `/api/user/delete-account` | POST | 注销账户（永久删除） |
 | `/api/user/delete-upload` | POST | 删除指定上传文件的数据 |
+| `/api/upload/debug` | GET | 查询指定上传源的“原件-抽取-L1/L0”对照信息（登录用户与会话均可用） |
 
 所有需要认证的接口通过 `Authorization: Bearer <token>` 请求头传递 JWT 令牌。
 

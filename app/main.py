@@ -3,16 +3,19 @@ from __future__ import annotations
 import hashlib
 import io
 import base64
+import concurrent.futures
 import json
 import mimetypes
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
@@ -38,6 +41,7 @@ from app.llm import (
     embed_text,
     extract_date_fields_with_vision_bytes,
     extract_date_with_vision_bytes,
+    ocr_with_aliyun_ocr_bytes,
     ocr_with_vision_bytes,
     ocr_with_vision_bytes_transcribe,
 )
@@ -77,6 +81,7 @@ GUIDELINES_VERSION_PATH = ROOT / "data" / "guidelines_versions.json"
 AUDIT_LOG_PATH = ROOT / "data" / "audit_log.jsonl"
 USER_DB_PATH = ROOT / "data" / "users.db"
 USER_DATA_ROOT = ROOT / "data" / "user_data"
+SESSION_UPLOAD_ORIGINALS_ROOT = ROOT / "data" / "session_upload_originals"
 
 CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen-plus")
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-max")
@@ -84,9 +89,21 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "")
 ENABLE_UPLOAD_DEID = os.getenv("ENABLE_UPLOAD_DEID", "true").strip().lower() in {"1", "true", "yes", "on"}
+SAVE_UPLOAD_ORIGINALS = os.getenv("SAVE_UPLOAD_ORIGINALS", "false").strip().lower() in {"1", "true", "yes", "on"}
 OCR_PROVIDER = os.getenv("OCR_PROVIDER", "auto").strip().lower()
 PADDLE_OCR_LANG = os.getenv("PADDLE_OCR_LANG", "ch").strip()
 PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "500"))
+ALIYUN_OCR_MODEL = os.getenv("ALIYUN_OCR_MODEL", "qwen-vl-ocr-latest").strip()
+_aliyun_ocr_min_pixels_raw = os.getenv("ALIYUN_OCR_MIN_PIXELS", "3072").strip()
+_aliyun_ocr_max_pixels_raw = os.getenv("ALIYUN_OCR_MAX_PIXELS", "8388608").strip()
+try:
+    ALIYUN_OCR_MIN_PIXELS = max(int(_aliyun_ocr_min_pixels_raw), 0)
+except Exception:
+    ALIYUN_OCR_MIN_PIXELS = 3072
+try:
+    ALIYUN_OCR_MAX_PIXELS = max(int(_aliyun_ocr_max_pixels_raw), 0)
+except Exception:
+    ALIYUN_OCR_MAX_PIXELS = 8_388_608
 ENABLE_IMAGE_DATE_VLM = os.getenv("ENABLE_IMAGE_DATE_VLM", "true").strip().lower() in {"1", "true", "yes", "on"}
 TIMELINE_ENCODER = os.getenv("TIMELINE_ENCODER", "mamba").strip().lower()
 if TIMELINE_ENCODER not in {"linear", "ssm", "mamba"}:
@@ -106,7 +123,7 @@ ENABLE_LOCAL_LITERATURE_AGENT = (
 LITERATURE_AGENT_TOPIC_QUERY = os.getenv(
     "LITERATURE_AGENT_TOPIC_QUERY",
     (
-        "(breast cancer OR mammary carcinoma OR breast neoplasm) "
+        "(colorectal cancer OR colon cancer OR rectal cancer) "
         "AND (clinical OR guideline OR trial OR treatment)"
     ),
 ).strip()
@@ -139,7 +156,17 @@ OPENVIKING_RAG_L1_BUDGET = max(int(os.getenv("OPENVIKING_RAG_L1_BUDGET", "6")), 
 OPENVIKING_RAG_L2_BUDGET = max(int(os.getenv("OPENVIKING_RAG_L2_BUDGET", "2")), 0)
 OPENVIKING_RAG_DEEP_L1_BUDGET = max(int(os.getenv("OPENVIKING_RAG_DEEP_L1_BUDGET", "10")), OPENVIKING_RAG_L1_BUDGET)
 OPENVIKING_RAG_DEEP_L2_BUDGET = max(int(os.getenv("OPENVIKING_RAG_DEEP_L2_BUDGET", "4")), OPENVIKING_RAG_L2_BUDGET)
-CHAT_COMPLETION_TIMEOUT_SECONDS = max(float(os.getenv("CHAT_COMPLETION_TIMEOUT_SECONDS", "120")), 5.0)
+OPENVIKING_INTERNAL_COMPLEX_SEARCH = (
+    os.getenv("OPENVIKING_INTERNAL_COMPLEX_SEARCH", "false").strip().lower() in {"1", "true", "yes", "on"}
+)
+_chat_timeout_raw = os.getenv("CHAT_COMPLETION_TIMEOUT_SECONDS", "120").strip().lower()
+if _chat_timeout_raw in {"0", "none", "off", "false", "no"}:
+    CHAT_COMPLETION_TIMEOUT_SECONDS: float | None = None
+else:
+    try:
+        CHAT_COMPLETION_TIMEOUT_SECONDS = max(float(_chat_timeout_raw or "120"), 5.0)
+    except Exception:
+        CHAT_COMPLETION_TIMEOUT_SECONDS = 120.0
 CHAT_PROGRESS_TTL_SECONDS = max(int(os.getenv("CHAT_PROGRESS_TTL_SECONDS", "1800")), 60)
 
 app = FastAPI(title="Colon Cancer RAG MVP")
@@ -157,6 +184,12 @@ _EMBED_CACHE_MAX = int(os.getenv("EMBED_CACHE_MAX", "2048"))
 _global_embed_cache: OrderedDict[str, list[float]] = OrderedDict()
 
 
+def _chat_timeout_kwargs() -> dict[str, Any]:
+    if CHAT_COMPLETION_TIMEOUT_SECONDS is None:
+        return {}
+    return {"timeout": CHAT_COMPLETION_TIMEOUT_SECONDS}
+
+
 def _global_embed(text: str) -> list[float]:
     """Embed *text* with global LRU caching."""
     cached = _global_embed_cache.get(text)
@@ -168,6 +201,11 @@ def _global_embed(text: str) -> list[float]:
     while len(_global_embed_cache) > _EMBED_CACHE_MAX:
         _global_embed_cache.popitem(last=False)
     return vec
+
+
+def _ms(start: float, end: float | None = None) -> float:
+    end_ts = time.perf_counter() if end is None else end
+    return max((end_ts - start) * 1000.0, 0.0)
 
 IMAGE_SUFFIXES = {
     ".jpg",
@@ -419,8 +457,11 @@ def _expire_session(session_id: str, reason: str = "ttl") -> bool:
     removed_store = session_stores.pop(session_id, None)
     removed_events = session_timeline_events.pop(session_id, [])
     removed_openviking = session_openviking_stores.pop(session_id, None)
+    removed_original_files = _clear_session_originals(session_id)
     removed = removed_store is not None or bool(removed_events)
     if removed_openviking is not None:
+        removed = True
+    if removed_original_files > 0:
         removed = True
     if removed:
         audit_logger.log(
@@ -430,6 +471,7 @@ def _expire_session(session_id: str, reason: str = "ttl") -> bool:
                 "ttl_seconds": SESSION_TTL_SECONDS,
                 "dropped_timeline_events": len(removed_events),
                 "dropped_openviking_items": removed_openviking.stats().get("total", 0) if removed_openviking else 0,
+                "dropped_original_files": removed_original_files,
                 "proof": "session_vector_store_removed",
                 "reason": reason,
             },
@@ -466,6 +508,361 @@ def _get_session_id(request: Request) -> str:
     if session_id:
         return session_id
     return f"s-{uuid.uuid4().hex[:16]}"
+
+
+def _safe_upload_filename(file_name: str) -> str:
+    name = Path(str(file_name or "unnamed")).name
+    name = name.replace("/", "_").replace("\\", "_").strip()
+    return name or "unnamed"
+
+
+def _normalize_upload_source(source: str) -> str:
+    src = str(source or "").strip()
+    if not src:
+        return "session/unnamed"
+    return src if src.startswith("session/") else f"session/{src}"
+
+
+def _upload_source_storage_name(source: str) -> str:
+    normalized = _normalize_upload_source(source)
+    base_name = _safe_upload_filename(normalized.removeprefix("session/"))
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"{digest}__{base_name}"
+
+
+def _relative_to_root(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except Exception:
+        return str(path)
+
+
+def _safe_header_value(value: str) -> str:
+    text = str(value or "")
+    try:
+        text.encode("latin-1")
+        return text
+    except Exception:
+        return quote(text, safe="/:@._-")
+
+
+def _user_upload_originals_dir(user_id: str) -> Path:
+    return user_manager.get_user_data_dir(user_id) / "upload_originals"
+
+
+def _session_upload_originals_dir(session_id: str) -> Path:
+    sid = _normalize_session_id(session_id) or "anonymous"
+    return SESSION_UPLOAD_ORIGINALS_ROOT / sid
+
+
+def _original_file_path_for_source(
+    source: str,
+    *,
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> Path | None:
+    name = _upload_source_storage_name(source)
+    if user_id:
+        return _user_upload_originals_dir(user_id) / name
+    if session_id:
+        return _session_upload_originals_dir(session_id) / name
+    return None
+
+
+def _save_upload_original(
+    source: str,
+    file_bytes: bytes,
+    *,
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {"saved": False, "path": "", "size": int(len(file_bytes))}
+    target_path = _original_file_path_for_source(source, user_id=user_id, session_id=session_id)
+    if target_path is None:
+        return out
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(file_bytes)
+    out["saved"] = True
+    out["path"] = _relative_to_root(target_path)
+    return out
+
+
+def _delete_upload_original(
+    source: str,
+    *,
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> bool:
+    target_path = _original_file_path_for_source(source, user_id=user_id, session_id=session_id)
+    if target_path is None or not target_path.exists() or not target_path.is_file():
+        return False
+    try:
+        target_path.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _clear_session_originals(session_id: str) -> int:
+    folder = _session_upload_originals_dir(session_id)
+    if not folder.exists():
+        return 0
+    removed_files = 0
+    try:
+        for item in folder.rglob("*"):
+            if item.is_file():
+                try:
+                    item.unlink()
+                    removed_files += 1
+                except Exception:
+                    pass
+        shutil.rmtree(folder, ignore_errors=True)
+    except Exception:
+        pass
+    return removed_files
+
+
+def _is_within_base(path: Path, base: Path) -> bool:
+    try:
+        rp = path.resolve()
+        rb = base.resolve()
+        return rp == rb or rb in rp.parents
+    except Exception:
+        return False
+
+
+def _resolve_original_file_for_source(
+    source: str,
+    *,
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> tuple[Path | None, str]:
+    raw = str(source or "").strip()
+    if not raw:
+        return None, ""
+
+    if raw.startswith("viking://"):
+        resolved = _resolve_source_from_viking_uri(raw, user_id=user_id, session_id=session_id)
+        if resolved:
+            raw = resolved
+        else:
+            return None, raw
+
+    if raw.startswith("internal/"):
+        rel = raw.removeprefix("internal/").strip().lstrip("/\\")
+        if not rel:
+            return None, "internal/"
+        candidate = (GUIDELINES_DIR / rel).resolve()
+        if not _is_within_base(candidate, GUIDELINES_DIR):
+            return None, f"internal/{rel}"
+        if candidate.exists() and candidate.is_file():
+            normalized_rel = str(Path(rel).as_posix()).strip()
+            return candidate, f"internal/{normalized_rel}"
+        return None, f"internal/{rel}"
+
+    normalized = _normalize_upload_source(raw)
+    candidate = _original_file_path_for_source(
+        normalized,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    if candidate is None:
+        return None, normalized
+    if candidate.exists() and candidate.is_file():
+        return candidate, normalized
+    return None, normalized
+
+
+def _resolve_source_from_viking_uri(
+    viking_uri: str,
+    *,
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> str:
+    uri = str(viking_uri or "").strip()
+    if not uri.startswith("viking://"):
+        return ""
+
+    stores: list[OpenVikingStore] = [internal_openviking_store]
+    if user_id:
+        stores.append(_get_user_openviking_store(user_id))
+    elif session_id:
+        s_store = _get_session_openviking_store(session_id)
+        if s_store is not None:
+            stores.append(s_store)
+
+    for store in stores:
+        try:
+            src = str(store.resolve_source(uri) or "").strip()
+        except Exception:
+            src = ""
+        if src:
+            return src
+
+    prefix = "viking://resources/"
+    if not uri.startswith(prefix):
+        return ""
+    relative = uri[len(prefix):].strip("/")
+    if not relative:
+        return ""
+    # Fallback for URIs like:
+    # viking://resources/internal-guidelines/internal/README_COLON.md
+    m = re.search(r"(?:^|/)internal/(.+)$", relative)
+    if m:
+        rel = str(m.group(1) or "").strip().lstrip("/\\")
+        if rel:
+            return f"internal/{rel}"
+    return ""
+
+
+def _guess_file_media_type(file_path: Path, source_hint: str = "") -> str:
+    candidates = [file_path.name, str(source_hint or "")]
+    for name in candidates:
+        guessed = mimetypes.guess_type(name)[0] or ""
+        if guessed and guessed != "application/octet-stream":
+            return guessed
+
+    head = b""
+    try:
+        with open(file_path, "rb") as fin:
+            head = fin.read(64)
+    except Exception:
+        return "application/octet-stream"
+
+    if head.startswith(b"%PDF-"):
+        return "application/pdf"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if head.startswith(b"BM"):
+        return "image/bmp"
+    if head.startswith((b"II*\x00", b"MM\x00*")):
+        return "image/tiff"
+    if len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+
+    try:
+        with Image.open(file_path) as img:
+            fmt = str(getattr(img, "format", "") or "").upper()
+        pil_map = {
+            "JPEG": "image/jpeg",
+            "PNG": "image/png",
+            "GIF": "image/gif",
+            "BMP": "image/bmp",
+            "TIFF": "image/tiff",
+            "WEBP": "image/webp",
+            "ICO": "image/x-icon",
+        }
+        if fmt in pil_map:
+            return pil_map[fmt]
+    except Exception:
+        pass
+
+    return "application/octet-stream"
+
+
+def _native_storage_root_path() -> Path:
+    raw = os.getenv("OPENVIKING_NATIVE_STORAGE_PATH", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return (Path.cwd() / "data" / "openviking_native").resolve()
+
+
+def _resolve_native_source_markdown(user_id: str, source: str) -> Path | None:
+    user_dir = user_manager.get_user_data_dir(user_id)
+    native_index = user_dir / "openviking_native_index.json"
+    if not native_index.exists():
+        return None
+    try:
+        payload = json.loads(native_index.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        item = payload.get(source)
+        if not isinstance(item, dict):
+            return None
+        root_uri = str(item.get("root_uri") or item.get("target_uri") or "").strip()
+        prefix = "viking://resources/"
+        if not root_uri.startswith(prefix):
+            return None
+        relative = root_uri[len(prefix):].strip("/")
+        if not relative:
+            return None
+        node = Path(relative).name
+        return _native_storage_root_path() / "viking" / "resources" / relative / f"{node}.md"
+    except Exception:
+        return None
+
+
+def _parse_openviking_native_markdown(markdown: str) -> tuple[str, list[dict[str, str]]]:
+    text = str(markdown or "")
+    l0 = ""
+    l1_items: list[dict[str, str]] = []
+    m_l0 = re.search(r"##\s*L0\s*(.*?)(?:\n##\s*L1|\Z)", text, flags=re.S)
+    if m_l0:
+        l0 = m_l0.group(1).strip()
+    m_l1 = re.search(r"##\s*L1\s*(.*?)(?:\n##\s*L2|\Z)", text, flags=re.S)
+    if not m_l1:
+        return l0, l1_items
+    block = m_l1.group(1).strip()
+    for m in re.finditer(r"###\s*(.+?)\n(.*?)(?=\n###\s+|\Z)", block, flags=re.S):
+        title = str(m.group(1) or "").strip()
+        summary = str(m.group(2) or "").strip()
+        if summary:
+            l1_items.append({"title": title, "summary": summary})
+    return l0, l1_items
+
+
+def _load_native_openviking_source_snapshot(user_id: str, source: str) -> dict[str, Any]:
+    md_path = _resolve_native_source_markdown(user_id, source)
+    if md_path is None or not md_path.exists():
+        return {"available": False}
+    try:
+        payload = md_path.read_text(encoding="utf-8")
+        l0, l1_items = _parse_openviking_native_markdown(payload)
+        return {
+            "available": True,
+            "path": _relative_to_root(md_path),
+            "l0": l0,
+            "l1": l1_items,
+        }
+    except Exception:
+        return {"available": False}
+
+
+def _chunk_order_key(chunk_id: str) -> tuple[int, str]:
+    m = re.search(r"-(\d+)$", str(chunk_id or ""))
+    if m:
+        return int(m.group(1)), str(chunk_id or "")
+    return 10**9, str(chunk_id or "")
+
+
+def _sorted_source_chunks(store: VectorStore, source: str) -> list[Any]:
+    matched = [c for c in getattr(store, "chunks", []) if str(getattr(c, "source", "")) == source]
+    matched.sort(key=lambda c: _chunk_order_key(str(getattr(c, "id", ""))))
+    return matched
+
+
+def _merge_source_chunks_text(chunks: list[Any]) -> str:
+    return "\n\n".join(str(getattr(c, "text", "") or "").strip() for c in chunks if str(getattr(c, "text", "") or "").strip())
+
+
+def _normalize_text_for_compare(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _first_diff_offset(left: str, right: str) -> int:
+    a = str(left or "")
+    b = str(right or "")
+    size = min(len(a), len(b))
+    for idx in range(size):
+        if a[idx] != b[idx]:
+            return idx
+    if len(a) != len(b):
+        return size
+    return -1
 
 
 def _get_auth_user(request: Request):
@@ -596,7 +993,7 @@ def _fallback_openviking_layers(source: str, chunks: list[Any]) -> tuple[str, li
     stage_hits = list(dict.fromkeys(re.findall(r"(?:IIIC|IIIB|IIIA|IV|III|II|I)\s*期", merged, flags=re.IGNORECASE)))
     diagnosis_line = ""
     for line in re.split(r"[。\n]", merged):
-        if any(k in line for k in ("诊断", "乳腺", "癌", "肿瘤")):
+        if any(k in line for k in ("诊断", "结肠", "直肠", "癌", "肿瘤")):
             diagnosis_line = line.strip()
             if diagnosis_line:
                 break
@@ -670,7 +1067,7 @@ def _generate_openviking_layers(source: str, chunks: list[Any]) -> tuple[str, li
                 },
             ],
             temperature=0.0,
-            timeout=CHAT_COMPLETION_TIMEOUT_SECONDS,
+            **_chat_timeout_kwargs(),
         )
         raw = resp.choices[0].message.content or ""
         parsed = json.loads(_extract_json_object(raw))
@@ -726,6 +1123,77 @@ def _build_evidence_snippet(text: str, query: str, max_chars: int = OPENVIKING_E
             end = min(len(payload), start + max_chars)
             return payload[start:end].strip()
     return payload[:max_chars].strip()
+
+
+def _extract_page_hint(text: str) -> int | None:
+    m = re.search(r"(?:\[)?第\s*(\d{1,4})\s*页(?:\])?", str(text or ""))
+    if not m:
+        return None
+    try:
+        page = int(m.group(1))
+    except Exception:
+        return None
+    return page if page > 0 else None
+
+
+def _extract_verbatim_quote(text: str, query: str, max_chars: int = 140) -> str:
+    payload = str(text or "").strip()
+    if not payload:
+        return ""
+    keywords = _extract_retrieval_keywords(query, max_terms=6)
+    compact = re.sub(r"\s+", " ", payload).strip()
+    segments = [
+        s.strip()
+        for s in re.split(r"[。！？!?；;\n]+", compact)
+        if len(s.strip()) >= 8
+    ]
+    if not segments:
+        return compact[:max_chars].strip()
+
+    def _score(seg: str) -> tuple[int, int]:
+        hit = 0
+        low = seg.lower()
+        for kw in keywords:
+            if kw.lower() in low:
+                hit += 1
+        # Higher keyword overlap first, then prefer moderate sentence length.
+        return hit, -abs(len(seg) - 52)
+
+    ranked = sorted(segments, key=_score, reverse=True)
+    picked = ranked[0].strip()
+    if len(picked) <= max_chars:
+        return picked
+    return picked[:max_chars].strip()
+
+
+def _verify_quote_in_text(source_text: str, quote: str) -> tuple[bool, str]:
+    base = str(source_text or "")
+    q = str(quote or "").strip()
+    if not base.strip() or not q:
+        return False, "missing"
+    if q in base:
+        return True, "exact"
+    if re.sub(r"\s+", "", q) in re.sub(r"\s+", "", base):
+        return True, "compact"
+    return False, "missing"
+
+
+def _build_source_text_index(vector_store: VectorStore | None) -> dict[str, str]:
+    if vector_store is None:
+        return {}
+    out: dict[str, str] = {}
+    by_source: dict[str, list[Any]] = {}
+    for chunk in getattr(vector_store, "chunks", []):
+        src = str(getattr(chunk, "source", "") or "").strip()
+        if not src:
+            continue
+        by_source.setdefault(src, []).append(chunk)
+    for src, chunks in by_source.items():
+        chunks.sort(key=lambda c: _chunk_order_key(str(getattr(c, "id", ""))))
+        text = _merge_source_chunks_text(chunks)
+        if text:
+            out[src] = text
+    return out
 
 
 def _rebuild_openviking_from_vector_store(
@@ -1132,6 +1600,23 @@ def _ocr_image_with_fallback(image_bytes: bytes, mime_type: str, ocr_mode: str =
             if provider == "paddle":
                 raise
 
+    if provider in {"auto", "aliyun"}:
+        try:
+            prompt = "请逐行转写图片中的全部可见中文/英文文字，保留换行。"
+            return ocr_with_aliyun_ocr_bytes(
+                client,
+                ALIYUN_OCR_MODEL,
+                image_bytes,
+                mime_type=mime_type,
+                prompt_text=prompt,
+                min_pixels=ALIYUN_OCR_MIN_PIXELS,
+                max_pixels=ALIYUN_OCR_MAX_PIXELS,
+            )
+        except Exception as exc:
+            errors.append(f"aliyun: {exc}")
+            if provider == "aliyun":
+                raise
+
     if provider in {"auto", "vision"}:
         try:
             vision_fn = ocr_with_vision_bytes_transcribe if ocr_mode == "guide" else ocr_with_vision_bytes
@@ -1335,6 +1820,7 @@ def _run_viking_retrieval(
     stores: list[tuple[str, OpenVikingStore]],
     history: list[dict[str, str]],
     session_id: str,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     is_complex = _is_complex_viking_query(query, history)
     query_embedding = _global_embed(query)
@@ -1344,12 +1830,30 @@ def _run_viking_retrieval(
         "stores": [],
     }
     merged: list[dict[str, Any]] = []
+    total_stores = max(len(stores), 1)
 
-    for store_name, store in stores:
+    for store_idx, (store_name, store) in enumerate(stores, start=1):
+        # Internal guideline store is usually much larger; prefer fast semantic find by default.
+        # Can be overridden with OPENVIKING_INTERNAL_COMPLEX_SEARCH=true.
+        use_search = is_complex and (
+            store_name != "internal" or OPENVIKING_INTERNAL_COMPLEX_SEARCH
+        )
+        retrieval_mode = "search" if use_search else "find"
+        if progress_cb:
+            progress_cb(
+                {
+                    "retrieval_phase": "store_start",
+                    "retrieval_store": store_name,
+                    "retrieval_store_index": store_idx,
+                    "retrieval_store_total": total_stores,
+                    "retrieval_mode": retrieval_mode,
+                    "retrieval_detail": f"{store_name} ({store_idx}/{total_stores})",
+                }
+            )
         store_session = None
-        if is_complex:
+        if use_search:
             store_session = store.session(session_id=f"{store.namespace}-{session_id}")
-        if is_complex:
+        if use_search:
             rows = store.search(
                 query=query,
                 target_uri=store.base_uri,
@@ -1364,6 +1868,16 @@ def _run_viking_retrieval(
             )
         used_legacy_fallback = False
         if not rows:
+            if progress_cb:
+                progress_cb(
+                    {
+                        "retrieval_phase": "legacy_fallback",
+                        "retrieval_store": store_name,
+                        "retrieval_store_index": store_idx,
+                        "retrieval_store_total": total_stores,
+                        "retrieval_detail": f"{store_name} ({store_idx}/{total_stores}) · legacy",
+                    }
+                )
             # Native unavailable or returned empty; fallback to legacy layer search.
             legacy = store.search_layer(
                 query=query,
@@ -1384,14 +1898,27 @@ def _run_viking_retrieval(
                     }
                 )
             used_legacy_fallback = bool(rows)
+        if progress_cb:
+            progress_cb(
+                {
+                    "retrieval_phase": "store_done",
+                    "retrieval_store": store_name,
+                    "retrieval_store_index": store_idx,
+                    "retrieval_store_total": total_stores,
+                    "retrieval_hits": len(rows),
+                    "retrieval_legacy_fallback": used_legacy_fallback,
+                    "retrieval_detail": f"{store_name} ({store_idx}/{total_stores}) · hits={len(rows)}",
+                }
+            )
         trace["stores"].append(
-            {
-                "store": store_name,
-                "target_uri": store.base_uri,
-                "hits": len(rows),
-                "legacy_fallback": used_legacy_fallback,
-            }
-        )
+                {
+                    "store": store_name,
+                    "target_uri": store.base_uri,
+                    "mode": retrieval_mode,
+                    "hits": len(rows),
+                    "legacy_fallback": used_legacy_fallback,
+                }
+            )
         for item in rows:
             uri = str(item.get("uri", "") or "")
             if not uri:
@@ -1435,6 +1962,7 @@ def _build_viking_evidence_bundle(
         store = hit.get("store")
         if not isinstance(store, OpenVikingStore):
             continue
+        source_key = store.resolve_source(uri)
         text = str(hit.get("overview", "") or hit.get("abstract", "")).strip()
         if not text:
             text = store.overview(uri)
@@ -1451,6 +1979,7 @@ def _build_viking_evidence_bundle(
                 "text": text,
                 "store_name": str(hit.get("store_name", "") or ""),
                 "title": _source_title_from_uri(uri),
+                "source_key": source_key,
             }
         )
 
@@ -1470,6 +1999,7 @@ def _build_viking_evidence_bundle(
                 child_uri = str(child.get("uri", "") or "")
                 if not child_uri or child_uri in seen_uri:
                     continue
+                source_key = store.resolve_source(child_uri)
                 text = store.overview(child_uri)
                 if not text:
                     continue
@@ -1484,6 +2014,7 @@ def _build_viking_evidence_bundle(
                         "text": text,
                         "store_name": str(hit.get("store_name", "") or ""),
                         "title": _source_title_from_uri(child_uri),
+                        "source_key": source_key,
                     }
                 )
 
@@ -1506,6 +2037,7 @@ def _build_viking_evidence_bundle(
                         break
                     if not m_uri or m_uri in seen_uri:
                         continue
+                    source_key = store.resolve_source(m_uri)
                     text = store.overview(m_uri)
                     if not text:
                         continue
@@ -1520,6 +2052,7 @@ def _build_viking_evidence_bundle(
                             "text": text,
                             "store_name": str(hit.get("store_name", "") or ""),
                             "title": _source_title_from_uri(m_uri),
+                            "source_key": source_key,
                         }
                     )
 
@@ -1532,6 +2065,7 @@ def _build_viking_evidence_bundle(
             store = hit.get("store")
             if not uri or not isinstance(store, OpenVikingStore):
                 continue
+            source_key = store.resolve_source(uri)
             text = store.read(uri)
             if not text:
                 continue
@@ -1545,6 +2079,7 @@ def _build_viking_evidence_bundle(
                     "text": text[:2600],
                     "store_name": str(hit.get("store_name", "") or ""),
                     "title": _source_title_from_uri(uri),
+                    "source_key": source_key,
                 }
             )
 
@@ -1706,7 +2241,9 @@ def health() -> dict[str, Any]:
         "literature_topic_query": LITERATURE_AGENT_TOPIC_QUERY,
         "vector_backend": get_vector_backend(),
         "upload_deid": ENABLE_UPLOAD_DEID,
+        "save_upload_originals": SAVE_UPLOAD_ORIGINALS,
         "ocr_provider": OCR_PROVIDER,
+        "aliyun_ocr_model": ALIYUN_OCR_MODEL,
         "paddle_available": is_paddle_available(),
         "pdf_ocr_max_pages": PDF_OCR_MAX_PAGES,
         "internal_chunks": int(internal_openviking_store.stats().get("total", 0)),
@@ -1726,6 +2263,7 @@ def health() -> dict[str, Any]:
         "openviking_l2_topk": OPENVIKING_L2_TOPK,
         "openviking_rag_l1_budget": OPENVIKING_RAG_L1_BUDGET,
         "openviking_rag_l2_budget": OPENVIKING_RAG_L2_BUDGET,
+        "openviking_internal_complex_search": OPENVIKING_INTERNAL_COMPLEX_SEARCH,
         "local_literature_agent_enabled": ENABLE_LOCAL_LITERATURE_AGENT,
         "local_literature_records": len(literature_index),
         "local_literature_last_refresh_at": int(literature_last_refresh_at) if literature_last_refresh_at else None,
@@ -1908,7 +2446,7 @@ def user_delete_upload(request: Request, source: str = "") -> JSONResponse:
         return JSONResponse({"ok": False, "error": "not_authenticated"}, status_code=401)
     if not source:
         return JSONResponse({"ok": False, "error": "source required"}, status_code=400)
-    full_source = f"session/{source}" if not source.startswith("session/") else source
+    full_source = _normalize_upload_source(source)
     store = _get_or_create_user_store(user_id)
     original_count = len(store.chunks)
     store.chunks = [c for c in store.chunks if c.source != full_source]
@@ -1923,11 +2461,13 @@ def user_delete_upload(request: Request, source: str = "") -> JSONResponse:
     removed_events = original_events - len(events)
     layered_store = _get_or_create_user_openviking_store(user_id)
     removed_layers = layered_store.remove_source(full_source)
+    removed_original = _delete_upload_original(full_source, user_id=user_id)
     return JSONResponse({
         "ok": True,
         "removed_chunks": removed_chunks,
         "removed_events": removed_events,
         "removed_openviking_layers": removed_layers,
+        "removed_original_file": removed_original,
         "remaining_chunks": len(store.chunks),
         "remaining_events": len(events),
         "remaining_openviking_layers": layered_store.stats().get("total", 0),
@@ -1942,7 +2482,7 @@ def bootstrap_literature_agent() -> None:
 
 @app.post("/api/upload")
 async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONResponse:
-    auth_user, auth_user_id = _get_auth_user(request)
+    _auth_user, auth_user_id = _get_auth_user(request)
     session_id = _get_session_id(request)
 
     # Use persistent user store if authenticated, otherwise in-memory session store
@@ -1960,11 +2500,26 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
     results = []
     has_error = False
     for f in files:
-        file_name = f.filename or "unnamed"
+        file_name = _safe_upload_filename(f.filename or "unnamed")
+        source_key = _normalize_upload_source(file_name)
         try:
+            file_start = time.perf_counter()
+            stage_ms: dict[str, float] = {}
             is_image, input_mime = _is_image_input(file_name, f.content_type)
+            stage_t0 = time.perf_counter()
             file_bytes = await f.read()
+            stage_ms["read_bytes_ms"] = round(_ms(stage_t0), 2)
+            original_file = {"saved": False, "path": "", "size": int(len(file_bytes))}
+            if SAVE_UPLOAD_ORIGINALS:
+                original_file = _save_upload_original(
+                    source_key,
+                    file_bytes,
+                    user_id=auth_user_id,
+                    session_id=None if auth_user_id else session_id,
+                )
+            stage_t0 = time.perf_counter()
             text, extract_meta = _extract_file_text_from_bytes(file_name, f.content_type, file_bytes)
+            stage_ms["extract_text_ms"] = round(_ms(stage_t0), 2)
             redaction = {}
             redaction_preview: list[str] = []
             image_redaction: dict[str, Any] = {
@@ -1975,27 +2530,70 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
                 "sensitive_box_count": 0,
                 "boxes": [],
             }
+            stage_t0 = time.perf_counter()
             if ENABLE_UPLOAD_DEID:
                 text, redaction_stats = redact_sensitive_info(text)
                 redaction = redaction_stats.as_dict()
                 redaction_preview = extract_redaction_preview(text)
+            stage_ms["deid_ms"] = round(_ms(stage_t0), 2)
+            stage_t0 = time.perf_counter()
             if is_image and ENABLE_UPLOAD_DEID:
                 image_redaction = _build_image_redaction_result(file_bytes, mime_type=input_mime)
+            stage_ms["image_redaction_ms"] = round(_ms(stage_t0), 2)
+            stage_t0 = time.perf_counter()
             chunks = split_text(text)
-            source_key = f"session/{file_name}"
+            stage_ms["split_ms"] = round(_ms(stage_t0), 2)
+            stage_t0 = time.perf_counter()
             added = active_store.add_texts(
                 source=source_key,
                 texts=chunks,
                 embed_fn=lambda t: embed_text(client, EMBEDDING_MODEL, t),
             )
-            extracted_events, has_known_date = _add_timeline_events(
-                session_id, source=source_key, text=text,
-                user_id=auth_user_id,
-            )
+            stage_ms["vector_add_ms"] = round(_ms(stage_t0), 2)
             layered_stats = {"l0": 0, "l1": 0}
+            source_chunks: list[Any] = []
             if active_openviking_store is not None:
-                source_chunks = [c for c in active_store.chunks if c.source == source_key]
-                layered_stats = _upsert_openviking_layers(active_openviking_store, source_key, source_chunks)
+                stage_t0 = time.perf_counter()
+                source_chunks = _sorted_source_chunks(active_store, source_key)
+                stage_ms["source_chunks_ms"] = round(_ms(stage_t0), 2)
+            else:
+                stage_ms["source_chunks_ms"] = 0.0
+
+            def _timed_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> tuple[Any, float]:
+                call_t0 = time.perf_counter()
+                out = fn(*args, **kwargs)
+                return out, _ms(call_t0)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                timeline_future = executor.submit(
+                    _timed_call,
+                    _add_timeline_events,
+                    session_id,
+                    source_key,
+                    text,
+                    user_id=auth_user_id,
+                )
+                openviking_future: concurrent.futures.Future[tuple[Any, float]] | None = None
+                if active_openviking_store is not None:
+                    openviking_future = executor.submit(
+                        _timed_call,
+                        _upsert_openviking_layers,
+                        active_openviking_store,
+                        source_key,
+                        source_chunks,
+                    )
+                timeline_out, timeline_elapsed = timeline_future.result()
+                extracted_events, has_known_date = timeline_out
+                stage_ms["timeline_ms"] = round(timeline_elapsed, 2)
+                if openviking_future is not None:
+                    layered_out, openviking_elapsed = openviking_future.result()
+                    layered_stats = dict(layered_out or {})
+                    stage_ms["openviking_ms"] = round(openviking_elapsed, 2)
+                else:
+                    stage_ms["openviking_ms"] = 0.0
+
+            processing_ms = round(_ms(file_start), 2)
+            stage_ms["total_ms"] = processing_ms
             date_warning = ""
             timeline_date = str((extract_meta or {}).get("timeline_date", "")).strip()
             timeline_date_source = str((extract_meta or {}).get("timeline_date_source", "")).strip()
@@ -2010,6 +2608,8 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
                     "timeline_events": extracted_events,
                     "openviking_l0": layered_stats.get("l0", 0),
                     "openviking_l1": layered_stats.get("l1", 0),
+                    "processing_ms": processing_ms,
+                    "stage_ms": stage_ms,
                     "date_detected": has_known_date,
                     "date_warning": date_warning,
                     "timeline_date": timeline_date,
@@ -2022,6 +2622,7 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
                     "redaction": redaction,
                     "redaction_preview": redaction_preview,
                     "image_redaction": image_redaction,
+                    "original_file": original_file,
                     "authenticated": auth_user_id is not None,
                 },
             )
@@ -2033,9 +2634,12 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
                     "redaction": redaction,
                     "redaction_preview": redaction_preview,
                     "image_redaction": image_redaction,
+                    "original_file": original_file,
                     "timeline_events": extracted_events,
                     "openviking_l0": layered_stats.get("l0", 0),
                     "openviking_l1": layered_stats.get("l1", 0),
+                    "processing_ms": processing_ms,
+                    "stage_ms": stage_ms,
                     "date_detected": has_known_date,
                     "date_warning": date_warning,
                     "timeline_date": timeline_date,
@@ -2064,8 +2668,197 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
             "timeline_event_count": len(timeline_events),
             "openviking_items": openviking_total,
             "persistent": auth_user_id is not None,
+            "save_upload_originals": SAVE_UPLOAD_ORIGINALS,
         },
         status_code=status_code,
+    )
+
+
+@app.get("/api/upload/debug")
+def upload_debug(
+    request: Request,
+    source: str = "",
+    reextract: bool = False,
+    preview_chars: int = 1200,
+) -> JSONResponse:
+    if not source.strip():
+        return JSONResponse({"ok": False, "error": "source required"}, status_code=400)
+    _auth_user, auth_user_id = _get_auth_user(request)
+    session_id = _get_session_id(request)
+    full_source = _normalize_upload_source(source)
+    active_store = _get_user_store(auth_user_id) if auth_user_id else _get_session_store(session_id)
+    if active_store is None:
+        return JSONResponse({"ok": False, "error": "no_active_store"}, status_code=404)
+
+    source_chunks = _sorted_source_chunks(active_store, full_source)
+    extracted_text = _merge_source_chunks_text(source_chunks)
+    max_preview = min(max(int(preview_chars), 120), 8000)
+    chunk_samples = [
+        {
+            "id": str(getattr(chunk, "id", "")),
+            "chars": len(str(getattr(chunk, "text", "") or "")),
+            "text_preview": str(getattr(chunk, "text", "") or "")[: min(max_preview, 360)],
+        }
+        for chunk in source_chunks[:8]
+    ]
+
+    original_path = _original_file_path_for_source(
+        full_source,
+        user_id=auth_user_id,
+        session_id=None if auth_user_id else session_id,
+    )
+    original_exists = bool(original_path and original_path.exists() and original_path.is_file())
+    original_meta = {
+        "enabled": SAVE_UPLOAD_ORIGINALS,
+        "exists": original_exists,
+        "path": _relative_to_root(original_path) if original_exists and original_path else "",
+        "size": int(original_path.stat().st_size) if original_exists and original_path else 0,
+        "updated_at": int(original_path.stat().st_mtime) if original_exists and original_path else 0,
+    }
+
+    l0_payload: list[dict[str, Any]] = []
+    l1_payload: list[dict[str, Any]] = []
+    openviking_from = "none"
+    if OPENVIKING_ENABLED:
+        layered_store = (
+            _get_user_openviking_store(auth_user_id)
+            if auth_user_id
+            else _get_session_openviking_store(session_id)
+        )
+        if layered_store is not None:
+            l0_items = layered_store.list_by_source(full_source, layer="L0")
+            l1_items = layered_store.list_by_source(full_source, layer="L1")
+            if l0_items or l1_items:
+                openviking_from = "legacy_json"
+                l0_payload = [
+                    {"id": it.id, "text": it.text}
+                    for it in l0_items
+                ]
+                l1_payload = [
+                    {"id": it.id, "title": it.title, "summary": it.text}
+                    for it in l1_items
+                ]
+            elif auth_user_id:
+                native_snapshot = _load_native_openviking_source_snapshot(auth_user_id, full_source)
+                if native_snapshot.get("available"):
+                    openviking_from = "native_markdown"
+                    l0_text = str(native_snapshot.get("l0", "")).strip()
+                    if l0_text:
+                        l0_payload = [{"id": f"{full_source}::L0::native", "text": l0_text}]
+                    for idx, item in enumerate(native_snapshot.get("l1", []), start=1):
+                        title = str((item or {}).get("title", "")).strip()
+                        summary = str((item or {}).get("summary", "")).strip()
+                        if summary:
+                            l1_payload.append(
+                                {
+                                    "id": f"{full_source}::L1::native::{idx}",
+                                    "title": title,
+                                    "summary": summary,
+                                }
+                            )
+
+    if auth_user_id:
+        all_events = _load_user_timeline(auth_user_id)
+    else:
+        all_events = session_timeline_events.get(session_id, [])
+    source_events = [ev for ev in all_events if str(getattr(ev, "source", "")) == full_source]
+
+    reextract_result: dict[str, Any] = {
+        "requested": bool(reextract),
+        "ok": False,
+        "error": "",
+    }
+    if reextract:
+        if not original_exists or original_path is None:
+            reextract_result["error"] = "original_not_found"
+        else:
+            try:
+                original_bytes = original_path.read_bytes()
+                file_name = _safe_upload_filename(full_source.removeprefix("session/"))
+                new_text, _meta = _extract_file_text_from_bytes(file_name, None, original_bytes)
+                if ENABLE_UPLOAD_DEID:
+                    new_text, _ = redact_sensitive_info(new_text)
+                normalized_stored = _normalize_text_for_compare(extracted_text)
+                normalized_new = _normalize_text_for_compare(new_text)
+                diff_at = _first_diff_offset(normalized_stored, normalized_new)
+                reextract_result = {
+                    "requested": True,
+                    "ok": True,
+                    "stored_chars": len(extracted_text),
+                    "reextracted_chars": len(new_text),
+                    "normalized_equal": normalized_stored == normalized_new,
+                    "first_diff_offset": diff_at,
+                    "reextracted_preview": new_text[:max_preview],
+                }
+            except Exception as exc:
+                reextract_result = {
+                    "requested": True,
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "source": full_source,
+            "persistent": auth_user_id is not None,
+            "scope": "user" if auth_user_id else "session",
+            "original_file": original_meta,
+            "extraction": {
+                "chunk_count": len(source_chunks),
+                "total_chars": len(extracted_text),
+                "text_preview": extracted_text[:max_preview],
+                "chunk_samples": chunk_samples,
+            },
+            "timeline": {
+                "event_count": len(source_events),
+                "events_preview": events_to_dict(source_events[:10]),
+            },
+            "openviking": {
+                "enabled": OPENVIKING_ENABLED,
+                "source": openviking_from,
+                "l0_count": len(l0_payload),
+                "l1_count": len(l1_payload),
+                "l0": l0_payload,
+                "l1": l1_payload,
+            },
+            "reextract": reextract_result,
+        }
+    )
+
+
+@app.get("/api/source/original")
+def source_original(request: Request, source: str = "") -> Response:
+    if not source.strip():
+        return JSONResponse({"ok": False, "error": "source required"}, status_code=400)
+
+    _auth_user, auth_user_id = _get_auth_user(request)
+    session_id = _get_session_id(request)
+    file_path, source_key = _resolve_original_file_for_source(
+        source,
+        user_id=auth_user_id,
+        session_id=None if auth_user_id else session_id,
+    )
+    if file_path is None:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "original_not_found",
+                "source": source_key,
+                "save_upload_originals": SAVE_UPLOAD_ORIGINALS,
+            },
+            status_code=404,
+        )
+
+    media_type = _guess_file_media_type(file_path, source_hint=source_key)
+    return FileResponse(
+        file_path,
+        media_type=media_type,
+        filename=file_path.name,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Source-Key": _safe_header_value(source_key),
+        },
     )
 
 
@@ -2259,7 +3052,23 @@ def delete_guideline(request: Request, filename: str) -> JSONResponse:
 def chat_progress(request_id: str) -> JSONResponse:
     payload = _chat_progress_payload(request_id)
     if payload is None:
-        return JSONResponse({"ok": False, "error": "request_id_not_found"}, status_code=404)
+        # Polling may arrive slightly earlier than /api/chat registers this request.
+        # Return pending to avoid noisy transient 404s in access logs.
+        return JSONResponse(
+            {
+                "ok": True,
+                "progress": {
+                    "request_id": request_id,
+                    "step": "accepted",
+                    "label": _chat_progress_step_label("accepted"),
+                    "status": "pending",
+                    "done": False,
+                    "elapsed_seconds": 0,
+                    "meta": {"pending": True},
+                },
+            },
+            status_code=202,
+        )
     return JSONResponse({"ok": True, "progress": payload})
 
 
@@ -2312,12 +3121,17 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
         if user_openviking_store is not None:
             stores.append(("user", user_openviking_store))
 
-        _chat_progress_update(chat_request_id, "retrieving_evidence")
+        _chat_progress_update(
+            chat_request_id,
+            "retrieving_evidence",
+            meta={"retrieval_detail": f"准备检索（0/{len(stores)}）"},
+        )
         all_hits, retrieval_trace = _run_viking_retrieval(
             query=payload.message,
             stores=stores,
             history=payload.history,
             session_id=progress_session_id,
+            progress_cb=lambda meta: _chat_progress_update(chat_request_id, "retrieving_evidence", meta=meta),
         )
         openviking_trace.update(retrieval_trace)
 
@@ -2328,16 +3142,34 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
         openviking_trace["evidence_items"] = len(evidence_items)
 
         ranked_sources: list[dict[str, Any]] = []
+        source_text_index = _build_source_text_index(user_store)
         context_rows: list[str] = []
         for rank, item in enumerate(evidence_items, start=1):
+            item_text = str(item.get("text", "") or "")
             snippet = _build_evidence_snippet(
-                str(item.get("text", "")),
+                item_text,
                 payload.message,
                 max_chars=1600 if str(item.get("layer", "L1")) == "L2" else 900,
             )
             citation = str(item.get("citation", "") or "")
             uri = str(item.get("uri", "") or "")
             layer = str(item.get("layer", "L1"))
+            source_key = str(item.get("source_key", "") or "").strip()
+            source_doc = source_key or uri
+            source_display = source_doc.removeprefix("session/").removeprefix("internal/")
+            quote = _extract_verbatim_quote(
+                item_text,
+                payload.message,
+                max_chars=180 if layer == "L2" else 120,
+            )
+            source_snapshot = source_text_index.get(source_key, "")
+            if source_snapshot:
+                quote_verified, quote_match_mode = _verify_quote_in_text(source_snapshot, quote)
+                quote_scope = "source_text"
+            else:
+                quote_verified, quote_match_mode = _verify_quote_in_text(item_text, quote)
+                quote_scope = "evidence_text"
+            page_hint = _extract_page_hint(item_text) or _extract_page_hint(snippet)
             score = round(float(item.get("score", 0.0) or 0.0), 4)
             store_name = str(item.get("store_name", "openviking") or "openviking")
             context_rows.append(
@@ -2350,14 +3182,21 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                     "chunk_id": f"{uri}::{layer}",
                     "source": uri,
                     "source_raw": uri,
+                    "source_doc": source_doc,
+                    "source_display": source_display,
                     "type": store_name,
                     "layer": layer,
                     "title": str(item.get("title", "") or ""),
-                    "page": None,
+                    "page": page_hint,
                     "section": None,
-                    "text_length": len(str(item.get("text", "") or "")),
+                    "text_length": len(item_text),
                     "preview": snippet[:220],
                     "evidence": snippet,
+                    "quote": quote,
+                    "quote_verified": quote_verified,
+                    "quote_match_mode": quote_match_mode,
+                    "quote_scope": quote_scope,
+                    "quote_page": page_hint,
                     "citation": citation,
                 }
             )
@@ -2437,7 +3276,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                 model=CHAT_MODEL,
                 messages=messages,
                 temperature=0.1,
-                timeout=CHAT_COMPLETION_TIMEOUT_SECONDS,
+                **_chat_timeout_kwargs(),
             )
             answer = _sanitize_model_disclosure(resp.choices[0].message.content or "暂无回复")
             answer = _normalize_answer_citations(answer, ranked_sources)

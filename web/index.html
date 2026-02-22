@@ -58,7 +58,7 @@
 
     .layout {
       display: grid;
-      grid-template-columns: 320px 1fr;
+      grid-template-columns: 320px minmax(0, 1fr) 420px;
       height: 100vh;
       max-width: 1920px;
       margin: 0 auto;
@@ -87,13 +87,130 @@
     /* Main Chat Area */
     .center {
       background: var(--bg-surface);
-      margin: 16px 16px 16px 0;
+      margin: 16px 0;
       border-radius: var(--radius-xl);
       box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.04), 0 2px 6px rgba(0, 0, 0, 0.05);
       display: flex;
       flex-direction: column;
       position: relative;
       overflow: hidden;
+    }
+
+    .source-pane {
+      background: var(--bg-surface);
+      margin: 16px;
+      margin-left: 16px;
+      border-radius: var(--radius-xl);
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.04), 0 2px 6px rgba(0, 0, 0, 0.05);
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .source-pane-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border-subtle);
+      background: #f8fafc;
+    }
+
+    .source-pane-title {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-secondary);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .source-pane-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 70%;
+    }
+
+    .source-pane-body {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: #f8fafc;
+      overflow: hidden;
+    }
+
+    .source-pane-empty {
+      margin: auto;
+      max-width: 280px;
+      text-align: center;
+      color: #6b7280;
+      font-size: 13px;
+      line-height: 1.6;
+      padding: 18px;
+    }
+
+    .source-pane-link {
+      color: #1d4ed8;
+      text-decoration: none;
+      font-weight: 600;
+    }
+
+    .source-pane-link:hover {
+      text-decoration: underline;
+    }
+
+    .source-frame-wrap {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      align-items: stretch;
+      justify-content: stretch;
+      background: #fff;
+    }
+
+    .source-frame {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #fff;
+    }
+
+    .source-image {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #fff;
+    }
+
+    .source-text-wrap {
+      width: 100%;
+      height: 100%;
+      overflow: auto;
+      padding: 12px;
+      background: #fff;
+      box-sizing: border-box;
+    }
+
+    .source-text {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--font-code, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+      font-size: 12px;
+      line-height: 1.55;
+      color: #111827;
+    }
+
+    .source-text-note {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #6b7280;
     }
 
     /* Sidebar Cards */
@@ -1203,6 +1320,12 @@
       color: #c5221f;
     }
 
+    @media (max-width: 1500px) {
+      .layout {
+        grid-template-columns: 300px minmax(0, 1fr) 360px;
+      }
+    }
+
     @media (max-width: 980px) {
       .layout {
         grid-template-columns: 1fr;
@@ -1226,6 +1349,14 @@
         border-radius: 0;
         height: auto;
         min-height: 500px;
+      }
+
+      .source-pane {
+        margin: 0;
+        border-radius: 0;
+        box-shadow: none;
+        border-top: 1px solid var(--border-subtle);
+        min-height: 360px;
       }
 
       .composer {
@@ -2222,6 +2353,16 @@
         <div class="muted" style="margin-top:8px">每条助手回复后都可展开“病情简报”和证据来源。</div>
       </div>
     </main>
+
+    <aside class="source-pane" id="source-pane">
+      <div class="source-pane-head">
+        <h2 class="source-pane-title">来源预览</h2>
+        <div class="source-pane-meta" id="source-pane-meta">未选择证据</div>
+      </div>
+      <div class="source-pane-body" id="source-pane-body">
+        <div class="source-pane-empty" id="source-pane-empty">点击回答中的证据编号（如 [1]），在这里查看原始图片、PDF 或文本文件。</div>
+      </div>
+    </aside>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>
@@ -2626,6 +2767,8 @@
     const thinkingElapsed = document.getElementById("thinking-elapsed");
     const thinkingProgressFill = document.getElementById("thinking-progress-fill");
     const thinkingStepTags = document.getElementById("thinking-step-tags");
+    const sourcePaneBody = document.getElementById("source-pane-body");
+    const sourcePaneMeta = document.getElementById("source-pane-meta");
 
     const uploadBtn = document.getElementById("upload-btn");
     const sendBtn = document.getElementById("send-btn");
@@ -2638,6 +2781,9 @@
     let thinkingElapsedTimer = null;
     let thinkingStartedAt = 0;
     let latestThinkingStepLabel = "请求已接收";
+    let sourcePreviewBlobUrl = "";
+    let sourcePreviewKey = "";
+    let sourcePreviewMime = "";
 
     const CHAT_PROGRESS_STEPS = [
       { key: "accepted", label: "已接收" },
@@ -2742,6 +2888,168 @@
       return html;
     }
 
+    function sourceKindFromName(name = "", mime = "") {
+      const lowerName = String(name || "").toLowerCase();
+      const lowerMime = String(mime || "").toLowerCase();
+      if (lowerMime.startsWith("image/")) return "image";
+      if (lowerMime.includes("pdf")) return "pdf";
+      if (lowerName.endsWith(".pdf")) return "pdf";
+      if (/\.(png|jpg|jpeg|bmp|webp|gif|tif|tiff|heic|heif)$/i.test(lowerName)) return "image";
+      if (
+        lowerMime.startsWith("text/") ||
+        /(json|xml|yaml|csv|markdown|javascript|x-sh|toml)/.test(lowerMime) ||
+        /\.(md|markdown|txt|json|csv|tsv|log|ini|cfg|conf|yaml|yml|xml|html|htm|py|js|ts|tsx|jsx|css|sql|sh|bash|zsh|toml)$/i.test(lowerName)
+      ) {
+        return "text";
+      }
+      return "other";
+    }
+
+    function cleanupSourcePreviewBlob() {
+      if (sourcePreviewBlobUrl) {
+        URL.revokeObjectURL(sourcePreviewBlobUrl);
+        sourcePreviewBlobUrl = "";
+      }
+      sourcePreviewKey = "";
+      sourcePreviewMime = "";
+    }
+
+    function renderSourcePlaceholder(text) {
+      if (!sourcePaneBody) return;
+      sourcePaneBody.innerHTML = "";
+      const empty = document.createElement("div");
+      empty.className = "source-pane-empty";
+      empty.textContent = String(text || "暂无可预览来源");
+      sourcePaneBody.appendChild(empty);
+    }
+
+    async function openSourcePreview(sourceDoc, page = 0) {
+      const source = String(sourceDoc || "").trim();
+      const pageNum = Number.isFinite(Number(page)) ? Math.max(0, Math.trunc(Number(page))) : 0;
+      if (!source) {
+        renderSourcePlaceholder("当前证据没有可回溯的原始文件。");
+        if (sourcePaneMeta) sourcePaneMeta.textContent = "未选择证据";
+        return;
+      }
+
+      if (sourcePaneMeta) {
+        const pageLabel = pageNum > 0 ? ` · 第${pageNum}页` : "";
+        sourcePaneMeta.textContent = `${source.replace(/^session\//, "").replace(/^internal\//, "")}${pageLabel}`;
+      }
+
+      try {
+        if (!sourcePaneBody) return;
+        sourcePaneBody.innerHTML = "";
+        const loading = document.createElement("div");
+        loading.className = "source-pane-empty";
+        loading.textContent = "正在加载原始文件...";
+        sourcePaneBody.appendChild(loading);
+
+        let blobUrl = sourcePreviewBlobUrl;
+        let mimeType = sourcePreviewMime;
+        if (sourcePreviewKey !== source || !blobUrl) {
+          cleanupSourcePreviewBlob();
+          const res = await fetch(`/api/source/original?source=${encodeURIComponent(source)}`, {
+            headers: authHeaders(),
+            cache: "no-store",
+          });
+          if (!res.ok) {
+            let errText = `无法打开来源文件（HTTP ${res.status}）`;
+            try {
+              const data = await res.json();
+              if (data?.error === "original_not_found") {
+                errText = data?.save_upload_originals
+                  ? "来源文件不存在或已被清理。"
+                  : "未保存原始文件，无法渲染原件。请开启 SAVE_UPLOAD_ORIGINALS 后重新上传。";
+              } else if (data?.error) {
+                errText = `无法打开来源文件：${data.error}`;
+              }
+            } catch (_err) {
+              // Ignore JSON parse errors and keep default message.
+            }
+            renderSourcePlaceholder(errText);
+            return;
+          }
+          const blob = await res.blob();
+          mimeType = String(blob.type || "");
+          blobUrl = URL.createObjectURL(blob);
+          sourcePreviewBlobUrl = blobUrl;
+          sourcePreviewKey = source;
+          sourcePreviewMime = mimeType;
+        }
+
+        const kind = sourceKindFromName(source, mimeType);
+        sourcePaneBody.innerHTML = "";
+        const wrap = document.createElement("div");
+        wrap.className = "source-frame-wrap";
+
+        if (kind === "image") {
+          const img = document.createElement("img");
+          img.className = "source-image";
+          img.alt = source;
+          img.src = blobUrl;
+          wrap.appendChild(img);
+        } else if (kind === "pdf") {
+          const frame = document.createElement("iframe");
+          frame.className = "source-frame";
+          frame.title = source;
+          const pageSuffix = pageNum > 0 ? `#page=${pageNum}&view=FitH` : "";
+          frame.src = `${blobUrl}${pageSuffix}`;
+          wrap.appendChild(frame);
+        } else if (kind === "text") {
+          const textWrap = document.createElement("div");
+          textWrap.className = "source-text-wrap";
+          const textPre = document.createElement("pre");
+          textPre.className = "source-text";
+          try {
+            const textResp = await fetch(blobUrl);
+            let rawText = await textResp.text();
+            const maxChars = 180000;
+            let truncated = false;
+            if (rawText.length > maxChars) {
+              rawText = rawText.slice(0, maxChars);
+              truncated = true;
+            }
+            textPre.textContent = rawText || "(空文件)";
+            textWrap.appendChild(textPre);
+            if (truncated) {
+              const note = document.createElement("div");
+              note.className = "source-text-note";
+              note.textContent = "文件较大，仅展示前 180000 个字符。";
+              textWrap.appendChild(note);
+            }
+          } catch (_err) {
+            textPre.textContent = "文本内容读取失败，请点击下方链接打开原文件。";
+            textWrap.appendChild(textPre);
+          }
+          wrap.appendChild(textWrap);
+        } else {
+          const holder = document.createElement("div");
+          holder.className = "source-pane-empty";
+          const link = document.createElement("a");
+          link.className = "source-pane-link";
+          link.href = blobUrl;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.textContent = "当前文件类型不支持内嵌预览，点击打开";
+          holder.appendChild(link);
+          wrap.appendChild(holder);
+        }
+        sourcePaneBody.appendChild(wrap);
+      } catch (err) {
+        renderSourcePlaceholder(`加载来源失败：${err?.message || "网络错误"}`);
+      }
+    }
+
+    function openSourcePreviewFromEvidenceNode(node) {
+      const el = node instanceof HTMLElement ? node : null;
+      if (!el) return;
+      const sourceDoc = String(el.dataset.sourceDoc || "").trim();
+      const sourcePage = Number(el.dataset.sourcePage || 0);
+      if (!sourceDoc) return;
+      void openSourcePreview(sourceDoc, sourcePage);
+    }
+
     function renderMessage(role, text) {
       const msgId = ++_msgIdCounter;
       const div = document.createElement("div");
@@ -2778,6 +3086,9 @@
             target.classList.remove("highlight");
             void target.offsetWidth; // force reflow
             target.classList.add("highlight");
+            if (link.dataset.citeType === "evidence") {
+              openSourcePreviewFromEvidenceNode(target);
+            }
           }
         });
       } else {
@@ -2831,7 +3142,20 @@
     function updateThinkingProgress(progress) {
       if (!progress || typeof progress !== "object") return;
       const step = String(progress.step || "accepted");
-      const label = String(progress.label || CHAT_PROGRESS_STEPS.find((x) => x.key === step)?.label || step);
+      const baseLabel = String(progress.label || CHAT_PROGRESS_STEPS.find((x) => x.key === step)?.label || step);
+      const meta = (progress.meta && typeof progress.meta === "object") ? progress.meta : {};
+      let detail = "";
+      if (step === "retrieving_evidence" && typeof meta.retrieval_detail === "string" && meta.retrieval_detail.trim()) {
+        detail = meta.retrieval_detail.trim();
+      } else if (step === "retrieving_evidence") {
+        const idx = Number(meta.retrieval_store_index || 0);
+        const total = Number(meta.retrieval_store_total || 0);
+        const name = String(meta.retrieval_store || "").trim();
+        if (name && idx > 0 && total > 0) {
+          detail = `${name} (${idx}/${total})`;
+        }
+      }
+      const label = detail ? `${baseLabel} · ${detail}` : baseLabel;
       const done = Boolean(progress.done) || String(progress.status || "") === "completed";
       latestThinkingStepLabel = label;
       if (thinkingStageText) {
@@ -3184,31 +3508,57 @@
             return;
           }
           const score = typeof src.score === "number" ? src.score.toFixed(4) : "n/a";
-          const page = Number.isFinite(Number(src.page)) ? `P${Number(src.page)}` : "P?";
+          const pageNum = Number(src.quote_page ?? src.page);
+          const page = Number.isFinite(pageNum) && pageNum > 0 ? `P${Math.trunc(pageNum)}` : "P?";
           const layer = src.layer || "L2";
+          const quoteVerified = Boolean(src.quote_verified);
+          const quoteScope = src.quote_scope === "source_text" ? "原文校验" : "片段校验";
+          const sourceDoc = String(src.source_doc || src.source || "").trim();
+          li.dataset.sourceDoc = sourceDoc;
+          li.dataset.sourcePage = Number.isFinite(pageNum) ? String(Math.max(0, Math.trunc(pageNum))) : "0";
+          li.style.cursor = sourceDoc ? "pointer" : "default";
           const meta = document.createElement("div");
           meta.className = "source-row-meta";
           meta.appendChild(createChip(`证据#${rank}`, "source-chip-rank"));
           meta.appendChild(createChip(layer, "source-chip-layer"));
           meta.appendChild(createChip(page, "source-chip-page"));
           meta.appendChild(createChip(`score ${score}`, "source-chip-score"));
+          meta.appendChild(createChip(quoteVerified ? quoteScope : "待校验", quoteVerified ? "source-chip-layer" : "source-chip-missing"));
           li.appendChild(meta);
           const uri = document.createElement("div");
           uri.className = "source-uri";
-          uri.textContent = src.source || "unknown";
+          uri.textContent = src.source_display || src.source_doc || src.source || "unknown";
           li.appendChild(uri);
+          if (src.source_doc && src.source_doc !== uri.textContent) {
+            const raw = document.createElement("div");
+            raw.className = "source-title";
+            raw.textContent = src.source_doc;
+            li.appendChild(raw);
+          }
           if (src.title) {
             const title = document.createElement("div");
             title.className = "source-title";
             title.textContent = src.title;
             li.appendChild(title);
           }
+          const quote = String(src.quote || "").trim();
+          if (quote) {
+            const q = document.createElement("div");
+            q.className = "source-preview";
+            q.textContent = `原文引用：${quote}`;
+            li.appendChild(q);
+          }
           const preview = String(src.evidence || src.preview || "").trim();
           if (preview) {
             const p = document.createElement("div");
             p.className = "source-preview";
-            p.textContent = preview.length > 120 ? `${preview.slice(0, 120)}...` : preview;
+            p.textContent = `证据片段：${preview.length > 120 ? `${preview.slice(0, 120)}...` : preview}`;
             li.appendChild(p);
+          }
+          if (sourceDoc) {
+            li.addEventListener("click", () => {
+              void openSourcePreview(sourceDoc, pageNum);
+            });
           }
           ul.appendChild(li);
         });
@@ -3342,6 +3692,22 @@
       return Object.values(redaction).reduce((acc, n) => acc + Number(n || 0), 0);
     }
 
+    function fmtMs(value) {
+      const n = Number(value || 0);
+      if (!Number.isFinite(n) || n <= 0) return "NA";
+      return `${Math.round(n)}ms`;
+    }
+
+    function formatUploadTiming(item) {
+      const stage = item.stage_ms || {};
+      const total = fmtMs(item.processing_ms || stage.total_ms);
+      const parts = [];
+      if (Number(stage.extract_text_ms) > 0) parts.push(`OCR=${fmtMs(stage.extract_text_ms)}`);
+      if (Number(stage.timeline_ms) > 0) parts.push(`时间线=${fmtMs(stage.timeline_ms)}`);
+      if (Number(stage.openviking_ms) > 0) parts.push(`L1/L0=${fmtMs(stage.openviking_ms)}`);
+      return parts.length ? ` | 耗时=${total} (${parts.join(", ")})` : ` | 耗时=${total}`;
+    }
+
     async function refreshTimeline() {
       try {
         const res = await fetch("/api/session/timeline", { headers: authHeaders() });
@@ -3427,7 +3793,7 @@
         const dateMsg = item.date_warning
           ? ` | 日期状态=未识别 (${item.date_warning})`
           : " | 日期状态=已识别";
-        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0} | L1=${item.openviking_l1 || 0} L0=${item.openviking_l0 || 0}${dateMsg}`;
+        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0} | L1=${item.openviking_l1 || 0} L0=${item.openviking_l0 || 0}${dateMsg}${formatUploadTiming(item)}`;
 
         // ── Redaction visualization card ──
         const redaction = item.redaction || {};
@@ -3711,7 +4077,7 @@
         const dateMsg = item.date_detected
           ? ` | 日期=${item.timeline_date}(${item.timeline_date_source})`
           : " | 日期=未知";
-        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0} | L1=${item.openviking_l1 || 0} L0=${item.openviking_l0 || 0}${dateMsg}`;
+        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0} | L1=${item.openviking_l1 || 0} L0=${item.openviking_l0 || 0}${dateMsg}${formatUploadTiming(item)}`;
 
         // ── Redaction visualization card ──
         const redaction = item.redaction || {};
@@ -3901,16 +4267,12 @@
       const text = input.value.trim();
       if (!text) return;
       const chatRequestId = `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const abortController = new AbortController();
-      const timeoutMs = 130000;
-      let timeoutHandle = null;
       sendBtn.disabled = true;
       renderMessage("user", text);
       input.value = "";
       showAssistantLoading(chatRequestId);
 
       try {
-        timeoutHandle = setTimeout(() => abortController.abort(), timeoutMs);
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: {
@@ -3919,7 +4281,6 @@
             ...authHeaders(),
           },
           body: JSON.stringify({ message: text, history }),
-          signal: abortController.signal,
         });
         let data = {};
         try {
@@ -3946,14 +4307,10 @@
         );
         await refreshTimeline();
       } catch (err) {
-        const isTimeout = err?.name === "AbortError";
         const stageHint = latestThinkingStepLabel ? `（当前步骤：${latestThinkingStepLabel}）` : "";
-        const message = isTimeout
-          ? `请求超时，已超过 ${Math.round(timeoutMs / 1000)} 秒${stageHint}。`
-          : `出错了：${err?.message || "网络错误"}${stageHint}`;
+        const message = `出错了：${err?.message || "网络错误"}${stageHint}`;
         renderMessage("assistant", message);
       } finally {
-        if (timeoutHandle) clearTimeout(timeoutHandle);
         hideAssistantLoading();
         sendBtn.disabled = false;
       }

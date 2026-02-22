@@ -18,4 +18,4 @@ data/*
 !data/
 !data/guidelines/
 data/guidelines/*
-!data/guidelines/README_BREAST.md
+!data/guidelines/README_COLON.md
