@@ -381,10 +381,11 @@
       width: fit-content;
       max-width: 80%;
       margin-left: auto;
-      background: #e7f0fe;
+      background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%);
       padding: 14px 20px;
       border-radius: 20px 20px 4px 20px;
-      border: none;
+      border: 1px solid rgba(99, 102, 241, 0.1);
+      box-shadow: 0 2px 8px rgba(99, 102, 241, 0.06);
     }
 
     .msg.assistant {
@@ -393,122 +394,278 @@
       padding-left: 0;
     }
 
-    /* Markdown Content Styling */
-    /* Markdown Content Styling */
+    /* ═══════════════════════════════════════════════════════
+       RICH MARKDOWN CONTENT RENDERING — Center Chat Area
+       ═══════════════════════════════════════════════════════ */
+
     .msg.assistant {
       font-size: 15px;
       color: var(--text-primary);
+      line-height: 1.75;
     }
 
+    /* ── Headings with accent decorations ── */
     .msg.assistant h1,
     .msg.assistant h2,
     .msg.assistant h3,
     .msg.assistant h4 {
-      margin-top: 24px;
-      margin-bottom: 12px;
-      font-weight: 600;
-      line-height: 1.4;
+      margin-top: 28px;
+      margin-bottom: 14px;
+      font-weight: 700;
+      line-height: 1.35;
       color: var(--text-primary);
+      position: relative;
     }
 
     .msg.assistant h1 {
-      font-size: 1.5em;
-      color: var(--primary);
-      border-bottom: 1px solid #e1e3e1;
-      padding-bottom: 8px;
+      font-size: 1.55em;
+      color: #1a365d;
+      padding-bottom: 12px;
+      padding-left: 16px;
+      border-bottom: 2px solid transparent;
+      border-image: linear-gradient(90deg, #3b82f6, #8b5cf6, #ec4899) 1;
+    }
+
+    .msg.assistant h1::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 4px;
+      bottom: 16px;
+      width: 4px;
+      border-radius: 4px;
+      background: linear-gradient(180deg, #3b82f6, #8b5cf6);
     }
 
     .msg.assistant h2 {
-      font-size: 1.25em;
+      font-size: 1.3em;
+      color: #1e40af;
+      padding-left: 14px;
+      border-left: 3px solid #3b82f6;
+      background: linear-gradient(90deg, rgba(59, 130, 246, 0.05) 0%, transparent 60%);
+      padding-top: 4px;
+      padding-bottom: 4px;
+      border-radius: 0 6px 6px 0;
     }
 
     .msg.assistant h3 {
-      font-size: 1.1em;
-      color: var(--text-secondary);
+      font-size: 1.15em;
+      color: #6d28d9;
+      padding-left: 12px;
     }
 
+    .msg.assistant h3::before {
+      content: '◆';
+      position: absolute;
+      left: 0;
+      color: #8b5cf6;
+      font-size: 0.6em;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    .msg.assistant h4 {
+      font-size: 1.05em;
+      color: #0369a1;
+      font-weight: 600;
+    }
+
+    /* ── Paragraphs ── */
     .msg.assistant p {
-      margin-bottom: 12px;
-      line-height: 1.6;
-      color: var(--text-primary);
+      margin-bottom: 14px;
+      line-height: 1.8;
+      color: #334155;
+      letter-spacing: 0.01em;
     }
 
-    .msg.assistant ul,
+    /* ── Lists with custom markers ── */
+    .msg.assistant ul {
+      margin-bottom: 18px;
+      padding-left: 8px;
+      list-style: none;
+    }
+
     .msg.assistant ol {
-      margin-bottom: 16px;
+      margin-bottom: 18px;
       padding-left: 24px;
       color: var(--text-primary);
     }
 
-    .msg.assistant li {
-      margin-bottom: 6px;
-      line-height: 1.6;
+    .msg.assistant ul>li {
+      margin-bottom: 8px;
+      line-height: 1.75;
+      padding-left: 22px;
+      position: relative;
     }
 
+    .msg.assistant ul>li::before {
+      content: '';
+      position: absolute;
+      left: 4px;
+      top: 10px;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      box-shadow: 0 0 4px rgba(59, 130, 246, 0.3);
+    }
+
+    .msg.assistant ol>li {
+      margin-bottom: 8px;
+      line-height: 1.75;
+      padding-left: 4px;
+    }
+
+    .msg.assistant ol>li::marker {
+      color: #6366f1;
+      font-weight: 700;
+    }
+
+    /* Nested list refinement */
+    .msg.assistant ul ul,
+    .msg.assistant ol ul {
+      margin-top: 6px;
+      margin-bottom: 6px;
+    }
+
+    .msg.assistant ul ul>li::before {
+      width: 5px;
+      height: 5px;
+      background: #94a3b8;
+      box-shadow: none;
+      top: 12px;
+    }
+
+    /* ── Bold / Strong — Vibrant Highlight ── */
     .msg.assistant strong {
       font-weight: 700;
-      color: var(--primary);
-      /* Highlight key points with primary color */
+      color: #1e3a5f;
+      background: linear-gradient(120deg, rgba(59, 130, 246, 0.08) 0%, rgba(139, 92, 246, 0.08) 100%);
+      padding: 1px 5px;
+      border-radius: 4px;
+      border-bottom: 2px solid rgba(59, 130, 246, 0.2);
     }
 
+    /* ── Emphasis/Italic ── */
+    .msg.assistant em {
+      color: #6d28d9;
+      font-style: italic;
+    }
+
+    /* ── Inline Code ── */
     .msg.assistant code {
-      background: #f1f3f4;
-      padding: 2px 6px;
-      border-radius: 6px;
-      font-family: var(--font-main);
-      font-size: 0.9em;
-      color: #c5221f;
+      background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+      padding: 2px 7px;
+      border-radius: 5px;
+      font-family: var(--font-cite);
+      font-size: 0.85em;
+      color: #92400e;
+      border: 1px solid rgba(245, 158, 11, 0.2);
+      font-weight: 500;
     }
 
+    /* ── Code Blocks ── */
     .msg.assistant pre {
-      background: #f8f9fa;
-      padding: 16px;
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      padding: 18px 20px;
       border-radius: 12px;
       overflow-x: auto;
-      border: 1px solid var(--border-subtle);
-      margin: 12px 0;
+      border: 1px solid #334155;
+      margin: 16px 0;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     }
 
     .msg.assistant pre code {
       background: transparent;
       padding: 0;
-      color: inherit;
+      color: #e2e8f0;
       border-radius: 0;
+      border: none;
+      font-size: 0.88em;
+      line-height: 1.6;
     }
 
+    /* ── Blockquotes — Vibrant accent ── */
     .msg.assistant blockquote {
-      border-left: 4px solid #dfe3e7;
-      background: #fff;
-      margin: 16px 0;
-      padding: 8px 16px;
-      color: var(--text-secondary);
+      border-left: 4px solid;
+      border-image: linear-gradient(180deg, #3b82f6, #8b5cf6) 1;
+      background: linear-gradient(135deg, #eff6ff 0%, #f5f3ff 50%, #fdf4ff 100%);
+      margin: 18px 0;
+      padding: 14px 18px;
+      border-radius: 0 10px 10px 0;
+      color: #475569;
+      font-style: italic;
+      position: relative;
+      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.06);
     }
 
+    .msg.assistant blockquote::before {
+      content: '\201C';
+      position: absolute;
+      top: -6px;
+      left: 8px;
+      font-size: 42px;
+      color: rgba(99, 102, 241, 0.15);
+      font-family: Georgia, serif;
+      line-height: 1;
+    }
+
+    .msg.assistant blockquote p {
+      margin-bottom: 6px;
+      color: #475569;
+    }
+
+    /* ── Tables — Rich Gradient Header ── */
     .msg.assistant table {
       width: 100%;
-      border-collapse: collapse;
-      margin: 16px 0;
+      border-collapse: separate;
+      border-spacing: 0;
+      margin: 20px 0;
       font-size: 14px;
-      border-radius: 8px;
+      border-radius: 12px;
       overflow: hidden;
-      border: 1px solid var(--border-subtle);
-    }
-
-    .msg.assistant th,
-    .msg.assistant td {
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--border-subtle);
-      text-align: left;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
     }
 
     .msg.assistant th {
-      background: #f8f9fa;
+      background: linear-gradient(135deg, #1e40af 0%, #6d28d9 100%);
       font-weight: 600;
-      color: var(--text-secondary);
+      color: #ffffff;
+      padding: 12px 16px;
+      text-align: left;
+      font-size: 13px;
+      letter-spacing: 0.03em;
+      text-transform: none;
+    }
+
+    .msg.assistant td {
+      padding: 11px 16px;
+      border-bottom: 1px solid #f1f5f9;
+      text-align: left;
+      color: #334155;
+    }
+
+    .msg.assistant tr:nth-child(even) td {
+      background: #f8fafc;
+    }
+
+    .msg.assistant tr:hover td {
+      background: #eff6ff;
+      transition: background 0.2s;
     }
 
     .msg.assistant tr:last-child td {
       border-bottom: none;
+    }
+
+    /* ── Horizontal Rule ── */
+    .msg.assistant hr {
+      border: none;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, #cbd5e1, #8b5cf6, #cbd5e1, transparent);
+      margin: 28px 0;
+      border-radius: 2px;
     }
 
     /* Composer (Input Area) */
@@ -786,20 +943,21 @@
       color: #137333;
     }
 
-    /* Thinking Indicator */
+    /* Thinking Indicator — Enhanced */
     .thinking-indicator {
       display: none;
       flex-direction: column;
       gap: 8px;
-      background: #f0f4f9;
+      background: linear-gradient(135deg, #eff6ff 0%, #f5f3ff 50%, #fdf4ff 100%);
       border-radius: var(--radius-l);
-      padding: 12px 16px;
+      padding: 14px 18px;
       margin: 0 auto 16px auto;
       max-width: 800px;
       font-size: 13px;
       color: var(--text-secondary);
-      border: 1px solid transparent;
+      border: 1px solid rgba(99, 102, 241, 0.1);
       animation: pulseSubtle 2s infinite;
+      box-shadow: 0 2px 8px rgba(99, 102, 241, 0.04);
     }
 
     .thinking-indicator.on {
@@ -838,7 +996,7 @@
     .thinking-progress-fill {
       height: 100%;
       width: 0%;
-      background: linear-gradient(90deg, #4285f4, #34a853);
+      background: linear-gradient(90deg, #3b82f6, #8b5cf6, #ec4899);
       border-radius: 999px;
       transition: width 0.25s ease;
     }
@@ -861,14 +1019,14 @@
     }
 
     .thinking-step-tag.active {
-      background: #e7f0fe;
-      color: #1967d2;
+      background: rgba(99, 102, 241, 0.1);
+      color: #6366f1;
       animation: pulseSubtle 1.5s infinite;
     }
 
     .thinking-step-tag.done {
-      background: #e6f4ea;
-      color: #137333;
+      background: rgba(16, 185, 129, 0.1);
+      color: #059669;
     }
 
     @keyframes pulseSubtle {
@@ -885,41 +1043,45 @@
       }
     }
 
-    /* ── Inline Citation Links (证据# / 文献#) ──────── */
+    /* ── Inline Citation Links — Enhanced Badge Style ── */
     .cite-link {
       display: inline;
       font-family: var(--font-cite);
-      font-size: 0.68em;
-      font-weight: 600;
-      color: #1d4ed8;
-      background: transparent;
-      padding: 0;
+      font-size: 0.65em;
+      font-weight: 700;
+      color: #fff;
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
+      padding: 1px 6px;
+      border-radius: 4px;
       text-decoration: none;
       cursor: pointer;
       border: none;
-      transition: color 0.2s ease;
+      transition: all 0.2s ease;
       vertical-align: super;
       letter-spacing: 0.02em;
       white-space: nowrap;
       line-height: 1;
       margin-left: 2px;
+      box-shadow: 0 1px 3px rgba(59, 130, 246, 0.25);
     }
 
     .cite-link:hover {
-      color: #1e40af;
-      text-decoration: underline;
+      transform: translateY(-1px);
+      box-shadow: 0 2px 6px rgba(59, 130, 246, 0.35);
+      filter: brightness(1.1);
+      text-decoration: none;
     }
 
     .cite-link.cite-evidence {
-      color: #1d4ed8;
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
     }
 
     .cite-link.cite-literature {
-      color: #92400e;
+      background: linear-gradient(135deg, #d97706, #b45309);
     }
 
     .cite-link.cite-literature:hover {
-      color: #78350f;
+      box-shadow: 0 2px 6px rgba(217, 119, 6, 0.35);
     }
 
     .cite-source-inline {
@@ -1019,29 +1181,39 @@
     }
 
     .patient-brief {
-      background: #fff7ed;
+      background: linear-gradient(135deg, #fff7ed 0%, #fffbf0 100%);
       border: 1px solid #fed7aa;
-      border-radius: 10px;
-      padding: 10px 12px;
-      margin-bottom: 10px;
+      border-left: 4px solid #f97316;
+      border-radius: 0 10px 10px 0;
+      padding: 12px 14px;
+      margin-bottom: 12px;
+      box-shadow: 0 2px 6px rgba(249, 115, 22, 0.06);
     }
 
     .patient-brief-title {
       font-size: 12px;
       font-weight: 700;
-      color: #9a3412;
+      color: #c2410c;
       margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .patient-brief-title::before {
+      content: '📋';
+      font-size: 14px;
     }
 
     .patient-brief-list {
       margin: 0;
       padding-left: 16px;
-      color: #7c2d12;
-      line-height: 1.5;
+      color: #9a3412;
+      line-height: 1.6;
     }
 
     .patient-brief-list li {
-      margin: 2px 0;
+      margin: 3px 0;
     }
 
     .evidence-accordion {
@@ -1050,19 +1222,29 @@
     }
 
     .evidence-item {
-      border: 1px solid #e5e7eb;
-      border-radius: 8px;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
       background: #fff;
       overflow: hidden;
+      transition: box-shadow 0.2s;
+    }
+
+    .evidence-item:hover {
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
     }
 
     .evidence-item summary {
       cursor: pointer;
       list-style: none;
-      padding: 10px 12px;
+      padding: 10px 14px;
       font-weight: 600;
-      color: #111827;
-      background: #f9fafb;
+      color: #1e293b;
+      background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+      transition: background 0.2s;
+    }
+
+    .evidence-item summary:hover {
+      background: linear-gradient(135deg, #eff6ff 0%, #eef2ff 100%);
     }
 
     .evidence-item summary::-webkit-details-marker {
@@ -1071,12 +1253,13 @@
 
     .evidence-item.open summary,
     .evidence-item[open] summary {
-      border-bottom: 1px solid #f0f0f0;
+      border-bottom: 1px solid #e2e8f0;
     }
 
     .evidence-item-body {
-      padding: 9px 12px 10px;
-      color: #4b5563;
+      padding: 10px 14px 12px;
+      color: #475569;
+      line-height: 1.6;
     }
 
     .conclusion-card {
