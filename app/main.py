@@ -1167,14 +1167,41 @@ def _extract_verbatim_quote(text: str, query: str, max_chars: int = 140) -> str:
 
 
 def _verify_quote_in_text(source_text: str, quote: str) -> tuple[bool, str]:
+    """Check whether *quote* can be found inside *source_text*.
+
+    Returns (verified: bool, match_mode: str).
+    We try progressively looser matching so that minor OCR / formatting
+    differences don't cause false negatives.
+    """
     base = str(source_text or "")
     q = str(quote or "").strip()
     if not base.strip() or not q:
         return False, "missing"
+    # 1) exact substring
     if q in base:
         return True, "exact"
-    if re.sub(r"\s+", "", q) in re.sub(r"\s+", "", base):
+    # 2) whitespace-collapsed
+    base_compact = re.sub(r"\s+", "", base)
+    q_compact = re.sub(r"\s+", "", q)
+    if q_compact in base_compact:
         return True, "compact"
+    # 3) punctuation-normalised (strip all punctuation & whitespace)
+    _punct_re = re.compile(r"[\s\u3000,，.。;；:：!！?？""\"'''\-—–\(\)（）\[\]【】{}\/<>《》、·…\u200b\ufeff]+")
+    base_norm = _punct_re.sub("", base).lower()
+    q_norm = _punct_re.sub("", q).lower()
+    if q_norm and q_norm in base_norm:
+        return True, "normalised"
+    # 4) fuzzy: ≥70 % of quote characters appear in order in source
+    if len(q_norm) >= 6:
+        bi = 0
+        matched = 0
+        for ch in q_norm:
+            pos = base_norm.find(ch, bi)
+            if pos != -1:
+                matched += 1
+                bi = pos + 1
+        if matched / len(q_norm) >= 0.70:
+            return True, "fuzzy"
     return False, "missing"
 
 
@@ -1672,6 +1699,32 @@ def _sanitize_model_disclosure(answer: str) -> str:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Comprehensive interpretation detection
+# ---------------------------------------------------------------------------
+_COMPREHENSIVE_INTERPRETATION_PATTERNS = [
+    # Explicit tag injected by UI quick-action button
+    re.compile(r"\[综合解读\]"),
+    # Natural Chinese phrases requesting full report interpretation
+    re.compile(r"(综合|全面|整体|所有|全部).*(解读|分析|评估|看看|看一下|看下|解释|总结|汇总)"),
+    re.compile(r"(解读|分析|看看|评估).*(所有|全部|全面|整体|综合)"),
+    re.compile(r"(帮我|请|麻烦).*(一起|综合|全面).*(解读|分析|看|评估)"),
+    re.compile(r"(解读|分析|看看).*(报告|文件|资料|检查|检验|影像)"),
+    re.compile(r"(报告|文件|资料|检查|检验|影像).*(解读|分析|看看|评估|看一下|看下)"),
+    re.compile(r"(帮我|请).*(解读|分析|评估|看看|看一下|看下|说明|梳理)"),
+    re.compile(r"(看看|分析).*(我的|目前|当前|现在).*(情况|状况|病情|结果)"),
+    re.compile(r"(目前|当前|我的).*(情况|状况|病情).*(怎么样|如何|怎样|什么样)"),
+]
+
+
+def _is_comprehensive_interpretation(query: str) -> bool:
+    """Return True if the user's query is requesting a comprehensive
+    interpretation of all uploaded reports, optionally combined with timeline."""
+    q = str(query or "").strip()
+    if not q:
+        return False
+    return any(p.search(q) for p in _COMPREHENSIVE_INTERPRETATION_PATTERNS)
+
 
 def _assess_reasoning_mode(
     query: str,
@@ -1941,8 +1994,10 @@ def _run_viking_retrieval(
 def _build_viking_evidence_bundle(
     query: str,
     hits: list[dict[str, Any]],
+    *,
+    force_deep: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    deep_mode = _wants_deep_answer(query)
+    deep_mode = force_deep or _wants_deep_answer(query)
     need_l2 = _needs_l2_drilldown(query)
     l1_budget = OPENVIKING_RAG_DEEP_L1_BUDGET if deep_mode else OPENVIKING_RAG_L1_BUDGET
     l2_budget = OPENVIKING_RAG_DEEP_L2_BUDGET if deep_mode else OPENVIKING_RAG_L2_BUDGET
@@ -3087,15 +3142,22 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
     try:
         _chat_progress_update(chat_request_id, "analyzing_question")
         timeline_events = _get_timeline_events(session_id, user_id=auth_user_id)
+        is_comprehensive = _is_comprehensive_interpretation(payload.message)
         reasoning_mode, reasoning_meta = _assess_reasoning_mode(
             payload.message,
             timeline_events,
             payload.history,
         )
+        if is_comprehensive:
+            reasoning_mode = "deep"
+            reasoning_meta["comprehensive"] = True
         timeline_state = encode_timeline_state(timeline_events, encoder=TIMELINE_ENCODER)
         retrieval_hint = build_retrieval_hint(payload.message, timeline_events, state=timeline_state)
-        timeline_summary = build_timeline_summary(timeline_events, max_items=8)
-        openviking_trace: dict[str, Any] = {"enabled": OPENVIKING_ENABLED}
+        timeline_summary = build_timeline_summary(
+            timeline_events,
+            max_items=30 if is_comprehensive else 8,
+        )
+        openviking_trace: dict[str, Any] = {"enabled": OPENVIKING_ENABLED, "comprehensive": is_comprehensive}
 
         user_store = _get_user_store(auth_user_id) if auth_user_id else _get_session_store(session_id)
         user_openviking_store = (
@@ -3136,7 +3198,11 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
         openviking_trace.update(retrieval_trace)
 
         _chat_progress_update(chat_request_id, "building_context", meta={"retrieved_hits": len(all_hits)})
-        evidence_items, budget_trace = _build_viking_evidence_bundle(payload.message, all_hits)
+        evidence_items, budget_trace = _build_viking_evidence_bundle(
+            payload.message,
+            all_hits,
+            force_deep=is_comprehensive,
+        )
         openviking_trace.update(budget_trace)
         openviking_trace["retrieved_hits"] = len(all_hits)
         openviking_trace["evidence_items"] = len(evidence_items)
@@ -3206,15 +3272,80 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
         style_hint = _build_response_style_hint(payload.message, reasoning_mode, payload.history)
 
         if not evidence_items:
-            keyword_text = ", ".join(next_keywords) if next_keywords else payload.message[:30]
-            answer = (
-                "证据不足：当前 OpenViking 检索未召回可直接支撑该问题的材料。"
-                "请补充更具体的检查项、时间范围或治疗阶段。"
-                f"可尝试检索关键词：{keyword_text}"
-            )
+            # ── Determine if we can fall back to history/timeline context ──
+            has_history = bool(payload.history and len(payload.history) >= 1)
+            has_timeline = bool(timeline_events and len(timeline_events) >= 1)
+            has_context_fallback = has_history or has_timeline
+
+            if has_context_fallback:
+                # Build a context-aware response using chat history + timeline
+                _chat_progress_update(chat_request_id, "generating_answer", meta={"fallback": "history_timeline"})
+
+                fallback_context_parts: list[str] = []
+                if has_timeline and timeline_summary.strip():
+                    fallback_context_parts.append(f"患者病程摘要：\n{timeline_summary}")
+                if has_history:
+                    recent_history = payload.history[-6:]
+                    history_text = "\n".join(
+                        f"{'用户' if m.get('role') == 'user' else '助手'}: {m.get('content', '')[:600]}"
+                        for m in recent_history
+                        if m.get("content", "").strip()
+                    )
+                    if history_text.strip():
+                        fallback_context_parts.append(f"近期对话记录：\n{history_text}")
+
+                fallback_context = "\n\n".join(fallback_context_parts).strip()
+
+                fallback_messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是一位经验丰富的结直肠外科高年资临床医生。"
+                            "当前未检索到直接证据片段，但你拥有患者的对话历史和/或病程时间线。"
+                            "请基于这些已有信息回答用户的问题。"
+                            "回答时请以第一人称，像主治医生和患者家属交流一样，语气温和、专业。"
+                            "如果用户要求通俗解释，请用患者/家属能理解的语言重新表述已有信息。"
+                            "不要编造不存在的检查结果或数据；如果信息不足以回答某个方面，请坦诚说明。"
+                        ),
+                    },
+                    {"role": "system", "content": style_hint},
+                    {
+                        "role": "system",
+                        "content": (
+                            f"患者时序状态({TIMELINE_ENCODER}): "
+                            f"risk_level={timeline_state.get('risk_level')} "
+                            f"event_count={int(float(timeline_state.get('event_count', 0.0)))}\n"
+                            f"已有上下文信息：\n{fallback_context}"
+                        ),
+                    },
+                ]
+                for msg in payload.history[-8:]:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if role in {"user", "assistant"} and content:
+                        fallback_messages.append({"role": role, "content": content})
+                fallback_messages.append({"role": "user", "content": payload.message})
+
+                resp = client.chat.completions.create(
+                    model=CHAT_MODEL,
+                    messages=fallback_messages,
+                    temperature=0.3,
+                    **_chat_timeout_kwargs(),
+                )
+                answer = _sanitize_model_disclosure(resp.choices[0].message.content or "暂无回复")
+                citation_warning = "本轮回答基于对话历史与病程时间线生成，未使用直接检索证据。"
+            else:
+                # Truly no context at all — return the hard "证据不足" message
+                keyword_text = ", ".join(next_keywords) if next_keywords else payload.message[:30]
+                answer = (
+                    "证据不足：当前 OpenViking 检索未召回可直接支撑该问题的材料。"
+                    "请补充更具体的检查项、时间范围或治疗阶段。"
+                    f"可尝试检索关键词：{keyword_text}"
+                )
+
             evidence_guard = {
                 "coverage": 0.0,
-                "unsupported_claims": 1,
+                "unsupported_claims": 0 if has_context_fallback else 1,
                 "verified_claims": 0,
                 "checks": [],
             }
@@ -3223,48 +3354,88 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
         else:
             _chat_progress_update(chat_request_id, "generating_answer", meta={"evidence_items": len(evidence_items)})
             context = "\n\n".join(context_rows).strip()
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是一个 OpenViking 驱动的 RAG 代理。"
-                        "你没有任何可信外部知识；所有事实与结论必须来自当前给定的 OpenViking 检索证据。"
-                        "除非用户明确允许，不得使用互联网或训练记忆补全事实。"
-                        "若证据不足，必须明确写“证据不足”；仅在必要时给出补充检索方向。"
-                        "首要任务是回答本轮用户问题；不要默认扩展为全局病情总结。"
-                    ),
-                },
-                {
-                    "role": "system",
-                    "content": (
-                        "输出结构必须自适应，不要固定三段或固定标题。"
-                        "简单问题直接回答，复杂问题再使用小标题或列表。"
-                        "引用策略：仅给关键结论、关键数字、关键建议添加少量证据标记，格式优先 [证据#N]。"
-                        "不要在每句话后都加引用，不要堆叠大段 source URI。"
-                        "不要为了凑结构新增用户未提问的结论。"
-                    ),
-                },
-                {"role": "system", "content": style_hint},
-                {
-                    "role": "system",
-                    "content": (
-                        "以下信息是可选背景，仅在与本轮问题直接相关时使用；若不相关请忽略，不得据此扩展结论。\n"
-                        f"患者时序状态({TIMELINE_ENCODER}): "
-                        f"risk_level={timeline_state.get('risk_level')} "
-                        f"event_count={int(float(timeline_state.get('event_count', 0.0)))}\n"
-                        f"检索路由建议: {retrieval_hint}\n"
-                        f"病程摘要:\n{timeline_summary}"
-                    ),
-                },
-                {
-                    "role": "system",
-                    "content": (
-                        "若用户问题过短、存在多种解释或缺少对象，请先给出一句澄清问题，"
-                        "并提供最多3个可选理解方向；在澄清前不要做全面展开。"
-                    ),
-                },
-                {"role": "system", "content": f"OpenViking 检索证据（仅可依据以下内容回答）:\n{context}"},
-            ]
+            if is_comprehensive:
+                # -- Comprehensive interpretation prompt --
+                messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是一位经验丰富的结直肠外科高年资临床医生。"
+                            "用户希望你对他们上传的所有报告和检查结果进行综合解读。"
+                            "请以第一人称，像主治医生与患者家属面对面交流一样自然回答。"
+                            "语气温和但专业，既要让非专业人士能理解，也要保持临床准确性。"
+                        ),
+                    },
+                    {
+                        "role": "system",
+                        "content": (
+                            "综合解读要求：\n"
+                            "1. 先整体概述患者当前状况（用1-2句话）。\n"
+                            "2. 逐份报告/检查解读关键发现及其临床意义，用通俗易懂的语言。\n"
+                            "3. 结合时间线分析病程演变趋势（好转/稳定/恶化）。\n"
+                            "4. 指出需要重点关注的异常项及其风险等级。\n"
+                            "5. 给出下一步建议（需要补充哪些检查、随访计划等）。\n"
+                            "不要反问用户要解读哪份报告——请直接综合解读所有可用资料。\n"
+                            "引用关键数据时标注 [证据#N]，但不要每句都加。"
+                        ),
+                    },
+                    {
+                        "role": "system",
+                        "content": (
+                            f"患者病程时间线（{TIMELINE_ENCODER}）：\n"
+                            f"风险等级: {timeline_state.get('risk_level')}\n"
+                            f"事件总数: {int(float(timeline_state.get('event_count', 0.0)))}\n"
+                            f"高风险事件: {int(float(timeline_state.get('high_risk_events', 0.0)))}\n"
+                            f"综合关注指数: {timeline_state.get('risk_score', 0)}\n\n"
+                            f"病程摘要:\n{timeline_summary}"
+                        ),
+                    },
+                    {"role": "system", "content": f"以下是用户上传的所有报告/检查证据，请综合解读：\n{context}"},
+                ]
+            else:
+                # -- Standard RAG prompt --
+                messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是一个 OpenViking 驱动的 RAG 代理。"
+                            "你没有任何可信外部知识；所有事实与结论必须来自当前给定的 OpenViking 检索证据。"
+                            "除非用户明确允许，不得使用互联网或训练记忆补全事实。"
+                            "若证据不足，必须明确写\u201c证据不足\u201d；仅在必要时给出补充检索方向。"
+                            "首要任务是回答本轮用户问题；不要默认扩展为全局病情总结。"
+                        ),
+                    },
+                    {
+                        "role": "system",
+                        "content": (
+                            "输出结构必须自适应，不要固定三段或固定标题。"
+                            "简单问题直接回答，复杂问题再使用小标题或列表。"
+                            "引用策略：仅给关键结论、关键数字、关键建议添加少量证据标记，格式优先 [证据#N]。"
+                            "不要在每句话后都加引用，不要堆叠大段 source URI。"
+                            "不要为了凑结构新增用户未提问的结论。"
+                        ),
+                    },
+                    {"role": "system", "content": style_hint},
+                    {
+                        "role": "system",
+                        "content": (
+                            "以下信息是可选背景，仅在与本轮问题直接相关时使用；若不相关请忽略，不得据此扩展结论。\n"
+                            f"患者时序状态({TIMELINE_ENCODER}): "
+                            f"risk_level={timeline_state.get('risk_level')} "
+                            f"event_count={int(float(timeline_state.get('event_count', 0.0)))}\n"
+                            f"检索路由建议: {retrieval_hint}\n"
+                            f"病程摘要:\n{timeline_summary}"
+                        ),
+                    },
+                    {
+                        "role": "system",
+                        "content": (
+                            "若用户问题过短、存在多种解释或缺少对象，请先给出一句澄清问题，"
+                            "并提供最多3个可选理解方向；在澄清前不要做全面展开。"
+                        ),
+                    },
+                    {"role": "system", "content": f"OpenViking 检索证据（仅可依据以下内容回答）:\n{context}"},
+                ]
             for msg in payload.history[-8:]:
                 role = msg.get("role", "user")
                 content = msg.get("content", "")

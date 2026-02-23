@@ -27,7 +27,7 @@
       --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
       --font-main: "Inter", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       --font-cite: "JetBrains Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      --chat-font-size: 22px;
+      --chat-font-size: 16px;
 
       /* Legacy variable mappings to prevent breakage */
       --bg: var(--bg-body);
@@ -395,264 +395,253 @@
     }
 
     /* ═══════════════════════════════════════════════════════
-       RICH MARKDOWN CONTENT RENDERING — Center Chat Area
+       RICH MARKDOWN — ChatGPT-inspired Clean Readability
        ═══════════════════════════════════════════════════════ */
 
     .msg.assistant {
-      font-size: 15px;
-      color: var(--text-primary);
-      line-height: 1.75;
+      font-size: 16px;
+      color: #374151;
+      line-height: 1.85;
+      letter-spacing: 0.01em;
+      word-break: break-word;
     }
 
-    /* ── Headings with accent decorations ── */
+    /* ── Headings — Clean, no heavy decorations ── */
     .msg.assistant h1,
     .msg.assistant h2,
     .msg.assistant h3,
     .msg.assistant h4 {
-      margin-top: 28px;
-      margin-bottom: 14px;
       font-weight: 700;
-      line-height: 1.35;
-      color: var(--text-primary);
+      line-height: 1.4;
+      color: #111827;
       position: relative;
+      margin-top: 32px;
+      margin-bottom: 16px;
+    }
+
+    .msg.assistant> :first-child {
+      margin-top: 0;
     }
 
     .msg.assistant h1 {
-      font-size: 1.55em;
-      color: #1a365d;
-      padding-bottom: 12px;
-      padding-left: 16px;
-      border-bottom: 2px solid transparent;
-      border-image: linear-gradient(90deg, #3b82f6, #8b5cf6, #ec4899) 1;
-    }
-
-    .msg.assistant h1::before {
-      content: '';
-      position: absolute;
-      left: 0;
-      top: 4px;
-      bottom: 16px;
-      width: 4px;
-      border-radius: 4px;
-      background: linear-gradient(180deg, #3b82f6, #8b5cf6);
+      font-size: 1.45em;
+      color: #111827;
+      padding-bottom: 10px;
+      border-bottom: 2px solid #e5e7eb;
     }
 
     .msg.assistant h2 {
-      font-size: 1.3em;
-      color: #1e40af;
-      padding-left: 14px;
-      border-left: 3px solid #3b82f6;
-      background: linear-gradient(90deg, rgba(59, 130, 246, 0.05) 0%, transparent 60%);
-      padding-top: 4px;
-      padding-bottom: 4px;
-      border-radius: 0 6px 6px 0;
+      font-size: 1.25em;
+      color: #1f2937;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #f3f4f6;
     }
 
     .msg.assistant h3 {
-      font-size: 1.15em;
-      color: #6d28d9;
-      padding-left: 12px;
+      font-size: 1.1em;
+      color: #1f2937;
+      padding-left: 14px;
     }
 
     .msg.assistant h3::before {
-      content: '◆';
+      content: '';
       position: absolute;
       left: 0;
-      color: #8b5cf6;
-      font-size: 0.6em;
-      top: 50%;
-      transform: translateY(-50%);
+      top: 3px;
+      bottom: 3px;
+      width: 3px;
+      border-radius: 3px;
+      background: #6366f1;
     }
 
     .msg.assistant h4 {
-      font-size: 1.05em;
-      color: #0369a1;
+      font-size: 1em;
+      color: #374151;
       font-weight: 600;
     }
 
-    /* ── Paragraphs ── */
+    /* ── Paragraphs — Generous spacing ── */
     .msg.assistant p {
-      margin-bottom: 14px;
-      line-height: 1.8;
-      color: #334155;
-      letter-spacing: 0.01em;
+      margin-top: 0;
+      margin-bottom: 18px;
+      line-height: 1.9;
+      color: #374151;
     }
 
-    /* ── Lists with custom markers ── */
+    .msg.assistant p:last-child {
+      margin-bottom: 0;
+    }
+
+    /* ── Lists — Clean bullets, generous spacing ── */
     .msg.assistant ul {
-      margin-bottom: 18px;
-      padding-left: 8px;
+      margin-top: 8px;
+      margin-bottom: 20px;
+      padding-left: 6px;
       list-style: none;
     }
 
     .msg.assistant ol {
-      margin-bottom: 18px;
-      padding-left: 24px;
-      color: var(--text-primary);
+      margin-top: 8px;
+      margin-bottom: 20px;
+      padding-left: 22px;
+      color: #374151;
     }
 
     .msg.assistant ul>li {
-      margin-bottom: 8px;
-      line-height: 1.75;
-      padding-left: 22px;
+      margin-bottom: 12px;
+      line-height: 1.85;
+      padding-left: 24px;
       position: relative;
     }
 
     .msg.assistant ul>li::before {
       content: '';
       position: absolute;
-      left: 4px;
-      top: 10px;
-      width: 7px;
-      height: 7px;
+      left: 6px;
+      top: 12px;
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
-      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-      box-shadow: 0 0 4px rgba(59, 130, 246, 0.3);
+      background: #6366f1;
     }
 
     .msg.assistant ol>li {
-      margin-bottom: 8px;
-      line-height: 1.75;
-      padding-left: 4px;
+      margin-bottom: 12px;
+      line-height: 1.85;
+      padding-left: 6px;
     }
 
     .msg.assistant ol>li::marker {
       color: #6366f1;
       font-weight: 700;
+      font-size: 0.95em;
     }
 
     /* Nested list refinement */
     .msg.assistant ul ul,
     .msg.assistant ol ul {
-      margin-top: 6px;
+      margin-top: 8px;
+      margin-bottom: 4px;
+    }
+
+    .msg.assistant ul ul>li {
       margin-bottom: 6px;
     }
 
     .msg.assistant ul ul>li::before {
       width: 5px;
       height: 5px;
-      background: #94a3b8;
-      box-shadow: none;
-      top: 12px;
+      background: #9ca3af;
+      top: 13px;
     }
 
-    /* ── Bold / Strong — Vibrant Highlight ── */
+    /* ── Bold / Strong — Clean emphasis ── */
     .msg.assistant strong {
       font-weight: 700;
-      color: #1e3a5f;
-      background: linear-gradient(120deg, rgba(59, 130, 246, 0.08) 0%, rgba(139, 92, 246, 0.08) 100%);
-      padding: 1px 5px;
-      border-radius: 4px;
-      border-bottom: 2px solid rgba(59, 130, 246, 0.2);
+      color: #111827;
     }
 
     /* ── Emphasis/Italic ── */
     .msg.assistant em {
-      color: #6d28d9;
+      color: #4b5563;
       font-style: italic;
     }
 
     /* ── Inline Code ── */
     .msg.assistant code {
-      background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-      padding: 2px 7px;
-      border-radius: 5px;
+      background: #f3f4f6;
+      padding: 2px 6px;
+      border-radius: 4px;
       font-family: var(--font-cite);
-      font-size: 0.85em;
-      color: #92400e;
-      border: 1px solid rgba(245, 158, 11, 0.2);
+      font-size: 0.88em;
+      color: #1f2937;
+      border: 1px solid #e5e7eb;
       font-weight: 500;
     }
 
     /* ── Code Blocks ── */
     .msg.assistant pre {
-      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      background: #1e1e1e;
       padding: 18px 20px;
-      border-radius: 12px;
+      border-radius: 10px;
       overflow-x: auto;
-      border: 1px solid #334155;
-      margin: 16px 0;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      border: 1px solid #333;
+      margin: 18px 0;
     }
 
     .msg.assistant pre code {
       background: transparent;
       padding: 0;
-      color: #e2e8f0;
+      color: #d4d4d4;
       border-radius: 0;
       border: none;
       font-size: 0.88em;
-      line-height: 1.6;
+      line-height: 1.65;
     }
 
-    /* ── Blockquotes — Vibrant accent ── */
+    /* ── Blockquotes — Clean accent bar ── */
     .msg.assistant blockquote {
-      border-left: 4px solid;
-      border-image: linear-gradient(180deg, #3b82f6, #8b5cf6) 1;
-      background: linear-gradient(135deg, #eff6ff 0%, #f5f3ff 50%, #fdf4ff 100%);
-      margin: 18px 0;
-      padding: 14px 18px;
-      border-radius: 0 10px 10px 0;
-      color: #475569;
-      font-style: italic;
+      border-left: 3px solid #6366f1;
+      background: #f9fafb;
+      margin: 20px 0;
+      padding: 14px 20px;
+      border-radius: 0 8px 8px 0;
+      color: #4b5563;
+      font-style: normal;
       position: relative;
-      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.06);
     }
 
     .msg.assistant blockquote::before {
-      content: '\201C';
-      position: absolute;
-      top: -6px;
-      left: 8px;
-      font-size: 42px;
-      color: rgba(99, 102, 241, 0.15);
-      font-family: Georgia, serif;
-      line-height: 1;
+      display: none;
     }
 
     .msg.assistant blockquote p {
-      margin-bottom: 6px;
-      color: #475569;
+      margin-bottom: 8px;
+      color: #4b5563;
     }
 
-    /* ── Tables — Rich Gradient Header ── */
+    .msg.assistant blockquote p:last-child {
+      margin-bottom: 0;
+    }
+
+    /* ── Tables — Clean design ── */
     .msg.assistant table {
       width: 100%;
       border-collapse: separate;
       border-spacing: 0;
-      margin: 20px 0;
+      margin: 22px 0;
       font-size: 14px;
-      border-radius: 12px;
+      border-radius: 10px;
       overflow: hidden;
-      border: 1px solid #e2e8f0;
-      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+      border: 1px solid #e5e7eb;
     }
 
     .msg.assistant th {
-      background: linear-gradient(135deg, #1e40af 0%, #6d28d9 100%);
+      background: #f9fafb;
       font-weight: 600;
-      color: #ffffff;
+      color: #374151;
       padding: 12px 16px;
       text-align: left;
       font-size: 13px;
-      letter-spacing: 0.03em;
+      border-bottom: 2px solid #e5e7eb;
+      letter-spacing: 0;
       text-transform: none;
     }
 
     .msg.assistant td {
       padding: 11px 16px;
-      border-bottom: 1px solid #f1f5f9;
+      border-bottom: 1px solid #f3f4f6;
       text-align: left;
-      color: #334155;
+      color: #374151;
     }
 
     .msg.assistant tr:nth-child(even) td {
-      background: #f8fafc;
+      background: #fafafa;
     }
 
     .msg.assistant tr:hover td {
-      background: #eff6ff;
-      transition: background 0.2s;
+      background: #f3f4f6;
+      transition: background 0.15s;
     }
 
     .msg.assistant tr:last-child td {
@@ -662,23 +651,262 @@
     /* ── Horizontal Rule ── */
     .msg.assistant hr {
       border: none;
-      height: 2px;
-      background: linear-gradient(90deg, transparent, #cbd5e1, #8b5cf6, #cbd5e1, transparent);
+      height: 1px;
+      background: #e5e7eb;
       margin: 28px 0;
-      border-radius: 2px;
     }
 
     /* Composer (Input Area) */
+    /* ── Quick Action Chips ── */
+    .quick-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 0 10%;
+      margin-bottom: 8px;
+      opacity: 0;
+      max-height: 0;
+      overflow: hidden;
+      transition: opacity 0.3s ease, max-height 0.3s ease, margin-bottom 0.3s ease;
+    }
+
+    .quick-actions.visible {
+      opacity: 1;
+      max-height: 60px;
+      margin-bottom: 8px;
+    }
+
+    .quick-action-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 7px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--border-subtle);
+      background: #fff;
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+      line-height: 1.3;
+    }
+
+    .quick-action-chip:hover {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+      transform: translateY(-1px);
+      box-shadow: 0 2px 8px rgba(11, 87, 208, 0.2);
+    }
+
+    .quick-action-chip:active {
+      transform: translateY(0);
+    }
+
+    .quick-action-chip .chip-icon {
+      font-size: 14px;
+      line-height: 1;
+    }
+
+    .quick-action-chip.chip-primary {
+      background: linear-gradient(135deg, #e8f0fe, #f0e6ff);
+      border-color: #c4d7f5;
+      color: var(--primary);
+      font-weight: 600;
+    }
+
+    .quick-action-chip.chip-primary:hover {
+      background: linear-gradient(135deg, var(--primary), #7c3aed);
+      color: #fff;
+      border-color: var(--primary);
+    }
+
     .composer {
       background: #fff;
       padding: 16px 10%;
       border-top: 1px solid #f0f0f0;
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       position: sticky;
       bottom: 0;
       z-index: 10;
+    }
+
+    /* ── Upload Plus Button ── */
+    .composer-upload-btn {
+      width: 44px;
+      height: 44px;
+      min-width: 44px;
+      border-radius: 50%;
+      border: 2px solid #e5e7eb;
+      background: #f9fafb;
+      color: #6b7280;
+      font-size: 24px;
+      font-weight: 400;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+      position: relative;
+      line-height: 1;
+    }
+
+    .composer-upload-btn:hover {
+      border-color: #6366f1;
+      color: #6366f1;
+      background: #eef2ff;
+      transform: scale(1.05);
+    }
+
+    .composer-upload-btn:active {
+      transform: scale(0.95);
+    }
+
+    .composer-upload-btn .upload-badge {
+      position: absolute;
+      top: -4px;
+      right: -4px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #6366f1;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+    }
+
+    .composer-upload-btn .upload-badge.on {
+      display: flex;
+    }
+
+    /* ── Floating Upload Panel ── */
+    .composer-upload-panel {
+      display: none;
+      position: absolute;
+      left: 10%;
+      right: 10%;
+      bottom: calc(100% + 8px);
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(0, 0, 0, 0.03);
+      padding: 16px 20px;
+      z-index: 20;
+      max-height: 320px;
+      overflow-y: auto;
+      animation: uploadPanelSlideUp 0.2s ease-out;
+    }
+
+    .composer-upload-panel.on {
+      display: block;
+    }
+
+    @keyframes uploadPanelSlideUp {
+      from {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .upload-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .upload-panel-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .upload-panel-title .icon {
+      font-size: 15px;
+    }
+
+    .upload-panel-close {
+      appearance: none;
+      border: none;
+      background: #f3f4f6;
+      color: #6b7280;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      font-size: 14px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s;
+    }
+
+    .upload-panel-close:hover {
+      background: #e5e7eb;
+      color: #374151;
+    }
+
+    .upload-panel-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .upload-panel-add-btn {
+      appearance: none;
+      border: 1px dashed #d1d5db;
+      background: #f9fafb;
+      color: #6366f1;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .upload-panel-add-btn:hover {
+      border-color: #6366f1;
+      background: #eef2ff;
+    }
+
+
+    .upload-panel-hint {
+      font-size: 11px;
+      color: #9ca3af;
+      margin-top: 4px;
+    }
+
+    /* Files list inside panel */
+    .composer-upload-panel .stack {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .composer-upload-panel .stack li {
+      font-size: 12px;
+      padding: 8px 10px;
+      margin-bottom: 4px;
+      border-radius: 8px;
+      background: #f9fafb;
+      border: 1px solid #f3f4f6;
     }
 
     #message {
@@ -1043,45 +1271,49 @@
       }
     }
 
-    /* ── Inline Citation Links — Enhanced Badge Style ── */
+    /* ── Inline Citation Links — Subtle superscript style ── */
     .cite-link {
       display: inline;
       font-family: var(--font-cite);
-      font-size: 0.65em;
+      font-size: 0.6em;
       font-weight: 700;
-      color: #fff;
-      background: linear-gradient(135deg, #3b82f6, #6366f1);
-      padding: 1px 6px;
-      border-radius: 4px;
+      color: #6366f1;
+      background: #eef2ff;
+      padding: 1px 5px;
+      border-radius: 3px;
       text-decoration: none;
       cursor: pointer;
-      border: none;
-      transition: all 0.2s ease;
+      border: 1px solid #c7d2fe;
+      transition: all 0.15s ease;
       vertical-align: super;
       letter-spacing: 0.02em;
       white-space: nowrap;
       line-height: 1;
-      margin-left: 2px;
-      box-shadow: 0 1px 3px rgba(59, 130, 246, 0.25);
+      margin-left: 1px;
     }
 
     .cite-link:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 2px 6px rgba(59, 130, 246, 0.35);
-      filter: brightness(1.1);
+      background: #e0e7ff;
+      border-color: #a5b4fc;
+      color: #4f46e5;
       text-decoration: none;
     }
 
     .cite-link.cite-evidence {
-      background: linear-gradient(135deg, #3b82f6, #6366f1);
+      color: #6366f1;
+      background: #eef2ff;
+      border-color: #c7d2fe;
     }
 
     .cite-link.cite-literature {
-      background: linear-gradient(135deg, #d97706, #b45309);
+      color: #b45309;
+      background: #fffbeb;
+      border-color: #fde68a;
     }
 
     .cite-link.cite-literature:hover {
-      box-shadow: 0 2px 6px rgba(217, 119, 6, 0.35);
+      background: #fef3c7;
+      border-color: #fbbf24;
     }
 
     .cite-source-inline {
@@ -1180,41 +1412,7 @@
       margin-top: 10px;
     }
 
-    .patient-brief {
-      background: linear-gradient(135deg, #fff7ed 0%, #fffbf0 100%);
-      border: 1px solid #fed7aa;
-      border-left: 4px solid #f97316;
-      border-radius: 0 10px 10px 0;
-      padding: 12px 14px;
-      margin-bottom: 12px;
-      box-shadow: 0 2px 6px rgba(249, 115, 22, 0.06);
-    }
 
-    .patient-brief-title {
-      font-size: 12px;
-      font-weight: 700;
-      color: #c2410c;
-      margin-bottom: 6px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .patient-brief-title::before {
-      content: '📋';
-      font-size: 14px;
-    }
-
-    .patient-brief-list {
-      margin: 0;
-      padding-left: 16px;
-      color: #9a3412;
-      line-height: 1.6;
-    }
-
-    .patient-brief-list li {
-      margin: 3px 0;
-    }
 
     .evidence-accordion {
       display: grid;
@@ -1547,6 +1745,10 @@
         bottom: 0;
       }
 
+      .quick-actions {
+        padding: 0 4%;
+      }
+
       .stack {
         max-height: none;
       }
@@ -1867,6 +2069,171 @@
       display: none;
     }
 
+
+    /* -- Session Management Panel -- */
+    .session-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .new-chat-btn {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 12px 16px;
+      background: var(--bg-surface);
+      border: 1px dashed var(--border-subtle);
+      border-radius: var(--radius-l);
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--primary);
+      transition: all 0.2s ease;
+      font-family: var(--font-main);
+    }
+
+    .new-chat-btn:hover {
+      background: #e7f0fe;
+      border-color: var(--primary);
+      box-shadow: 0 2px 8px rgba(11, 87, 208, 0.10);
+      transform: translateY(-1px);
+    }
+
+    .new-chat-btn .icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--primary);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+
+    .session-list-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      padding: 4px 4px 0;
+    }
+
+    .session-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+
+    .session-list::-webkit-scrollbar {
+      width: 3px;
+    }
+
+    .session-list::-webkit-scrollbar-thumb {
+      background: #ddd;
+      border-radius: 3px;
+    }
+
+    .session-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: var(--radius-m);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      position: relative;
+    }
+
+    .session-item:hover {
+      background: rgba(0, 0, 0, 0.04);
+    }
+
+    .session-item.active {
+      background: #e7f0fe;
+    }
+
+    .session-item .session-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #e8f0fe, #d3e3fd);
+      color: var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+
+    .session-item.active .session-icon {
+      background: linear-gradient(135deg, var(--primary), #4285f4);
+      color: #fff;
+    }
+
+    .session-item .session-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .session-item .session-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .session-item.active .session-title {
+      font-weight: 600;
+      color: var(--primary);
+    }
+
+    .session-item .session-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .session-item .session-delete {
+      opacity: 0;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 2px 6px;
+      border-radius: 6px;
+      transition: all 0.15s;
+      flex-shrink: 0;
+    }
+
+    .session-item:hover .session-delete {
+      opacity: 1;
+    }
+
+    .session-item .session-delete:hover {
+      background: #fef2f2;
+      color: #dc2626;
+    }
+
+    .session-empty {
+      text-align: center;
+      padding: 16px 8px;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
 
     /* ── User Panel (sidebar) ─────────────────────── */
     .user-panel {
@@ -2366,15 +2733,15 @@
 
     /* Apply dynamic font-size to chat messages */
     #chat-box .msg {
-      font-size: var(--chat-font-size, 22px);
+      font-size: var(--chat-font-size, 16px);
     }
 
     #chat-box .msg.assistant {
-      font-size: var(--chat-font-size, 22px);
+      font-size: var(--chat-font-size, 16px);
     }
 
     #chat-box .msg.user {
-      font-size: var(--chat-font-size, 22px);
+      font-size: var(--chat-font-size, 16px);
     }
   </style>
 </head>
@@ -2469,24 +2836,17 @@
       <!-- User/Guest Panel -->
       <div id="user-panel-container"></div>
 
-      <div class="card">
-        <h2>病例上传 <span id="persist-badge" class="persist-badge" style="display:none">已持久化</span></h2>
-        <div class="muted">支持 PDF/图片/txt。当前页面会话隔离，刷新后自动失效。</div>
-        <input id="file-input" type="file" multiple style="margin-top:8px" />
-        <button id="upload-btn" class="btn" style="width:100%;margin-top:8px">上传并入库</button>
-        <div id="upload-progress" class="upload-progress">
-          <div class="progress-header">
-            <span id="progress-label" class="progress-label">准备中...</span>
-            <span id="progress-timer" class="progress-timer">00:00</span>
-          </div>
-          <div class="progress-bar-track">
-            <div id="progress-bar-fill" class="progress-bar-fill"></div>
-          </div>
-          <div id="progress-steps" class="progress-steps"></div>
-          <div id="progress-file-status" class="progress-file-status"></div>
-        </div>
-        <ul id="files-list" class="stack"></ul>
+      <!-- Session Management -->
+      <div class="session-panel" id="session-panel">
+        <button class="new-chat-btn" id="new-chat-btn" type="button">
+          <span class="icon">+</span>
+          <span>新建会话</span>
+        </button>
+        <div class="session-list-title">历史会话</div>
+        <ul class="session-list" id="session-list"></ul>
       </div>
+
+      <!-- Upload card removed — upload is now in composer -->
 
       <div class="card">
         <h2>病程时间线 <span id="risk-pill" class="risk-pill risk-low">常规关注</span></h2>
@@ -2529,11 +2889,51 @@
           <div id="thinking-step-tags" class="thinking-step-tags"></div>
         </div>
         <div id="chat-box"></div>
-        <div class="composer" style="margin-top:10px">
+        <div class="quick-actions" id="quick-actions">
+          <button class="quick-action-chip chip-primary" id="qa-comprehensive" type="button"
+            title="综合解读所有上传的报告和检查结果，结合时间线给出完整分析">
+            <span class="chip-icon">📋</span>综合解读
+          </button>
+          <button class="quick-action-chip" id="qa-risk" type="button" title="评估当前风险等级和关注要点">
+            <span class="chip-icon">⚠️</span>风险评估
+          </button>
+          <button class="quick-action-chip" id="qa-next-steps" type="button" title="目前还缺哪些检查？下一步该做什么？">
+            <span class="chip-icon">🔍</span>下一步建议
+          </button>
+        </div>
+        <div class="composer" style="margin-top:10px;position:relative">
+          <!-- Floating Upload Panel -->
+          <div class="composer-upload-panel" id="composer-upload-panel">
+            <div class="upload-panel-header">
+              <span class="upload-panel-title"><span class="icon">📎</span>病例上传 <span id="persist-badge"
+                  class="persist-badge" style="display:none">已持久化</span></span>
+              <button class="upload-panel-close" id="upload-panel-close" type="button" title="关闭">✕</button>
+            </div>
+            <div id="upload-progress" class="upload-progress">
+              <div class="progress-header">
+                <span id="progress-label" class="progress-label">准备中...</span>
+                <span id="progress-timer" class="progress-timer">00:00</span>
+              </div>
+              <div class="progress-bar-track">
+                <div id="progress-bar-fill" class="progress-bar-fill"></div>
+              </div>
+              <div id="progress-steps" class="progress-steps"></div>
+              <div id="progress-file-status" class="progress-file-status"></div>
+            </div>
+            <ul id="files-list" class="stack"></ul>
+            <div class="upload-panel-actions">
+              <button class="upload-panel-add-btn" id="upload-add-more-btn" type="button">+ 添加文件</button>
+            </div>
+            <div class="upload-panel-hint">支持 PDF / 图片 / txt，文件大小不超过 50MB</div>
+          </div>
+          <input id="file-input" type="file" multiple style="display:none" />
+          <button class="composer-upload-btn" id="composer-upload-trigger" type="button" title="上传病例文件">
+            <span>+</span>
+            <span class="upload-badge" id="upload-file-badge"></span>
+          </button>
           <input id="message" placeholder="输入问题，例如：目前风险和可选治疗路径如何？还缺哪些关键报告？" />
           <button id="send-btn">发送</button>
         </div>
-        <div class="muted" style="margin-top:8px">每条助手回复后都可展开“病情简报”和证据来源。</div>
       </div>
     </main>
 
@@ -2612,9 +3012,186 @@
       document.getElementById('settings-modal').classList.remove('hidden');
     }
 
-    const pageSessionId = (window.crypto && window.crypto.randomUUID)
-      ? window.crypto.randomUUID()
-      : `sess-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    // ── Session Management ──
+    const SESSIONS_STORAGE_KEY = 'chat_sessions';
+    const ACTIVE_SESSION_KEY = 'active_session_id';
+
+    function generateSessionId() {
+      return (window.crypto && window.crypto.randomUUID)
+        ? window.crypto.randomUUID()
+        : `sess-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function loadSessions() {
+      try {
+        const raw = localStorage.getItem(SESSIONS_STORAGE_KEY);
+        return raw ? JSON.parse(raw) : [];
+      } catch { return []; }
+    }
+
+    function saveSessions(sessions) {
+      try { localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(sessions)); } catch { }
+    }
+
+    function getActiveSessionId() {
+      return localStorage.getItem(ACTIVE_SESSION_KEY) || '';
+    }
+
+    function setActiveSessionId(id) {
+      localStorage.setItem(ACTIVE_SESSION_KEY, id);
+    }
+
+    function findOrCreateActiveSession() {
+      let sessions = loadSessions();
+      let activeId = getActiveSessionId();
+      let active = sessions.find(s => s.id === activeId);
+      if (!active) {
+        const newId = generateSessionId();
+        active = {
+          id: newId,
+          title: '新对话',
+          created_at: Date.now(),
+          updated_at: Date.now(),
+          messages: [],
+          message_count: 0,
+        };
+        sessions.unshift(active);
+        saveSessions(sessions);
+        setActiveSessionId(newId);
+      }
+      return active;
+    }
+
+    function saveCurrentChatToSession() {
+      const sessions = loadSessions();
+      const idx = sessions.findIndex(s => s.id === pageSessionId);
+      if (idx < 0) return;
+      sessions[idx].messages = history.slice();
+      sessions[idx].message_count = Math.floor(history.length / 2);
+      sessions[idx].updated_at = Date.now();
+      // Auto-title from first user message
+      if (sessions[idx].title === '新对话' && history.length >= 1) {
+        const first = history.find(m => m.role === 'user');
+        if (first) {
+          let title = first.content.replace(/\s+/g, ' ').trim();
+          if (title.length > 28) title = title.slice(0, 28) + '...';
+          sessions[idx].title = title || '新对话';
+        }
+      }
+      saveSessions(sessions);
+    }
+
+    function createNewSession() {
+      // Save current chat first
+      saveCurrentChatToSession();
+      const newId = generateSessionId();
+      const newSession = {
+        id: newId,
+        title: '新对话',
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        messages: [],
+        message_count: 0,
+      };
+      const sessions = loadSessions();
+      sessions.unshift(newSession);
+      saveSessions(sessions);
+      setActiveSessionId(newId);
+      // Reload the page to reset state with new session
+      location.reload();
+    }
+
+    function switchToSession(targetId) {
+      if (targetId === pageSessionId) return;
+      saveCurrentChatToSession();
+      setActiveSessionId(targetId);
+      location.reload();
+    }
+
+    function deleteSession(targetId) {
+      let sessions = loadSessions();
+      sessions = sessions.filter(s => s.id !== targetId);
+      saveSessions(sessions);
+      if (targetId === pageSessionId) {
+        // Switching away from current session
+        if (sessions.length > 0) {
+          setActiveSessionId(sessions[0].id);
+        } else {
+          localStorage.removeItem(ACTIVE_SESSION_KEY);
+        }
+        location.reload();
+      } else {
+        renderSessionList();
+      }
+    }
+
+    function formatSessionTime(ts) {
+      const d = new Date(ts);
+      const now = new Date();
+      const diff = now - d;
+      if (diff < 60000) return '刚刚';
+      if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前';
+      if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前';
+      if (d.toDateString() === new Date(now - 86400000).toDateString()) return '昨天';
+      return `${d.getMonth() + 1}/${d.getDate()}`;
+    }
+
+    function renderSessionList() {
+      const listEl = document.getElementById('session-list');
+      if (!listEl) return;
+      const sessions = loadSessions();
+      listEl.innerHTML = '';
+      if (sessions.length === 0) {
+        listEl.innerHTML = '<li class="session-empty">暂无历史会话</li>';
+        return;
+      }
+      // Sort by updated_at desc
+      sessions.sort((a, b) => (b.updated_at || b.created_at) - (a.updated_at || a.created_at));
+      sessions.forEach(s => {
+        const li = document.createElement('li');
+        li.className = 'session-item' + (s.id === pageSessionId ? ' active' : '');
+
+        const icon = document.createElement('div');
+        icon.className = 'session-icon';
+        icon.textContent = '💬';
+
+        const info = document.createElement('div');
+        info.className = 'session-info';
+
+        const title = document.createElement('div');
+        title.className = 'session-title';
+        title.textContent = s.title || '新对话';
+        title.title = s.title || '新对话';
+
+        const meta = document.createElement('div');
+        meta.className = 'session-meta';
+        const msgCount = s.message_count || Math.floor((s.messages || []).length / 2);
+        meta.textContent = `${formatSessionTime(s.updated_at || s.created_at)}${msgCount > 0 ? ' · ' + msgCount + '轮对话' : ''}`;
+
+        info.appendChild(title);
+        info.appendChild(meta);
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'session-delete';
+        delBtn.textContent = '×';
+        delBtn.title = '删除会话';
+        delBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (confirm('确定删除该会话？')) deleteSession(s.id);
+        });
+
+        li.appendChild(icon);
+        li.appendChild(info);
+        li.appendChild(delBtn);
+        li.addEventListener('click', () => switchToSession(s.id));
+        listEl.appendChild(li);
+      });
+    }
+
+    // Initialize session
+    const activeSession = findOrCreateActiveSession();
+    const pageSessionId = activeSession.id;
+    setActiveSessionId(pageSessionId);
 
     // ── Auth State ──
     let authToken = localStorage.getItem('auth_token') || null;
@@ -2936,7 +3513,7 @@
       refreshTimeline();
     }
 
-    const history = [];
+    const history = (activeSession.messages && activeSession.messages.length) ? activeSession.messages.slice() : [];
 
     const markdownParser = window.markdownit ? window.markdownit({ html: false, linkify: true, breaks: true }) : null;
 
@@ -2953,7 +3530,7 @@
     const sourcePaneBody = document.getElementById("source-pane-body");
     const sourcePaneMeta = document.getElementById("source-pane-meta");
 
-    const uploadBtn = document.getElementById("upload-btn");
+
     const sendBtn = document.getElementById("send-btn");
     const selectedUploadFiles = new Map();
     let timelineFocusOnly = false;
@@ -3275,7 +3852,9 @@
           }
         });
       } else {
-        div.textContent = text;
+        // Strip internal quick-action tags from display
+        const displayText = text.replace(/\[综合解读\]\s*/g, "").trim();
+        div.textContent = displayText || text;
       }
       chatBox.appendChild(div);
       chatBox.scrollTop = chatBox.scrollHeight;
@@ -3447,24 +4026,7 @@
       return text;
     }
 
-    function buildPatientBriefItems(conclusions, unsupported, warning) {
-      const items = [];
-      if (conclusions.length) {
-        items.push(`当前最需要关注：${simplifyClaimForPatient(conclusions[0]?.claim || "")}`);
-        if (conclusions.length > 1) {
-          items.push(`其次建议留意：${simplifyClaimForPatient(conclusions[1]?.claim || "")}`);
-        }
-      } else {
-        items.push("本轮未提炼出稳定结论，建议补充更具体的问题或最新检查单。");
-      }
-      if (unsupported > 0) {
-        items.push(`有 ${unsupported} 条结论证据不足，已按保守口径处理。`);
-      }
-      if (warning) {
-        items.push(String(warning).trim());
-      }
-      return items.slice(0, 3);
-    }
+
 
     function applyRiskPill(level) {
       const pill = document.getElementById("risk-pill");
@@ -3615,21 +4177,7 @@
       const wrapper = document.createElement("div");
       wrapper.className = "round-meta";
 
-      const brief = document.createElement("div");
-      brief.className = "patient-brief";
-      const briefTitle = document.createElement("div");
-      briefTitle.className = "patient-brief-title";
-      briefTitle.textContent = "病情简报（通俗版）";
-      const briefList = document.createElement("ul");
-      briefList.className = "patient-brief-list";
-      buildPatientBriefItems(conclusions, unsupported, warning).forEach((text) => {
-        const li = document.createElement("li");
-        li.textContent = text;
-        briefList.appendChild(li);
-      });
-      brief.appendChild(briefTitle);
-      brief.appendChild(briefList);
-      wrapper.appendChild(brief);
+
 
       const summary = document.createElement("div");
       summary.className = "round-meta-summary";
@@ -3706,7 +4254,7 @@
           meta.appendChild(createChip(layer, "source-chip-layer"));
           meta.appendChild(createChip(page, "source-chip-page"));
           meta.appendChild(createChip(`score ${score}`, "source-chip-score"));
-          meta.appendChild(createChip(quoteVerified ? quoteScope : "待校验", quoteVerified ? "source-chip-layer" : "source-chip-missing"));
+          meta.appendChild(createChip(quoteVerified ? quoteScope : "AI摘要", quoteVerified ? "source-chip-layer" : "source-chip-score"));
           li.appendChild(meta);
           const uri = document.createElement("div");
           uri.className = "source-uri";
@@ -3896,7 +4444,19 @@
         const res = await fetch("/api/session/timeline", { headers: authHeaders() });
         const data = await res.json();
         renderTimelinePanel(data.state || {}, data.events || []);
+        // Show quick-action chips if any data is available
+        updateQuickActionsVisibility(data.event_count || 0);
       } catch (_) { }
+    }
+
+    function updateQuickActionsVisibility(eventCount) {
+      const el = document.getElementById("quick-actions");
+      if (!el) return;
+      if (eventCount > 0) {
+        el.classList.add("visible");
+      } else {
+        el.classList.remove("visible");
+      }
     }
 
 
@@ -4161,7 +4721,7 @@
       const allFiles = Array.from(selectedUploadFiles.values());
       const total = allFiles.length;
 
-      uploadBtn.disabled = true;
+      sendBtn.disabled = true;
       filesList.innerHTML = "";
       showUploadProgress();
       startUploadTimer();
@@ -4172,7 +4732,7 @@
       for (let i = 0; i < total; i++) {
         const file = allFiles[i];
         const fileNum = i + 1;
-        uploadBtn.textContent = `处理中... (${fileNum}/${total})`;
+        sendBtn.textContent = `处理中... (${fileNum}/${total})`;
         progressLabel.textContent = `正在处理：${file.name}（${fileNum}/${total}）`;
         setProgressPercent(((i) / total) * 100);
         renderProgressSteps("read");
@@ -4247,11 +4807,17 @@
       selectedUploadFiles.clear();
       fileInput.value = "";
 
-      uploadBtn.disabled = false;
-      uploadBtn.textContent = "上传并入库";
+      sendBtn.disabled = false;
+      if (typeof updateSendBtnLabel === "function") updateSendBtnLabel();
 
-      // Auto-hide progress after 8 seconds
-      setTimeout(() => { hideUploadProgress(); }, 8000);
+      // Clear badge
+      if (typeof updateUploadBadge === "function") updateUploadBadge();
+
+      // Auto-hide progress and panel after 8 seconds
+      setTimeout(() => {
+        hideUploadProgress();
+        if (typeof hideUploadPanel === "function") hideUploadPanel();
+      }, 8000);
     }
 
     function renderFileResult(item) {
@@ -4448,78 +5014,190 @@
     async function sendMessage() {
       const input = document.getElementById("message");
       const text = input.value.trim();
-      if (!text) return;
-      const chatRequestId = `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      sendBtn.disabled = true;
-      renderMessage("user", text);
-      input.value = "";
-      showAssistantLoading(chatRequestId);
+      const hasPendingFiles = selectedUploadFiles.size > 0;
 
-      try {
-        const res = await fetch("/api/chat", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Chat-Request-Id": chatRequestId,
-            ...authHeaders(),
-          },
-          body: JSON.stringify({ message: text, history }),
-        });
-        let data = {};
+      // Nothing to do
+      if (!text && !hasPendingFiles) return;
+
+      sendBtn.disabled = true;
+
+      // ── Step 1: Upload pending files (if any) ──
+      if (hasPendingFiles) {
+        await uploadFiles();
+      }
+
+      // ── Step 2: Send chat message (if any text) ──
+      if (text) {
+        const chatRequestId = `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        renderMessage("user", text);
+        input.value = "";
+        updateSendBtnLabel();
+        showAssistantLoading(chatRequestId);
+
         try {
-          data = await res.json();
-        } catch (_err) {
-          data = {};
+          const res = await fetch("/api/chat", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Chat-Request-Id": chatRequestId,
+              ...authHeaders(),
+            },
+            body: JSON.stringify({ message: text, history }),
+          });
+          let data = {};
+          try {
+            data = await res.json();
+          } catch (_err) {
+            data = {};
+          }
+          if (!res.ok) {
+            throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+          }
+          const assistantDiv = renderMessage("assistant", data.answer || "出错了，请稍后重试。");
+          history.push({ role: "user", content: text });
+          history.push({ role: "assistant", content: data.answer || "" });
+          saveCurrentChatToSession();
+          renderSessionList();
+          attachRoundEvidence(
+            assistantDiv,
+            data.sources || [],
+            data.evidence_guard || null,
+            data.citation_warning || "",
+            data.key_conclusions || [],
+            data.external_sources || [],
+            data.literature_guard || null,
+            data.reasoning_mode || "",
+            data.reasoning_meta || null,
+          );
+          await refreshTimeline();
+        } catch (err) {
+          const stageHint = latestThinkingStepLabel ? `（当前步骤：${latestThinkingStepLabel}）` : "";
+          const message = `出错了：${err?.message || "网络错误"}${stageHint}`;
+          renderMessage("assistant", message);
+        } finally {
+          hideAssistantLoading();
         }
-        if (!res.ok) {
-          throw new Error(data.detail || data.error || `HTTP ${res.status}`);
-        }
-        const assistantDiv = renderMessage("assistant", data.answer || "出错了，请稍后重试。");
-        history.push({ role: "user", content: text });
-        history.push({ role: "assistant", content: data.answer || "" });
-        attachRoundEvidence(
-          assistantDiv,
-          data.sources || [],
-          data.evidence_guard || null,
-          data.citation_warning || "",
-          data.key_conclusions || [],
-          data.external_sources || [],
-          data.literature_guard || null,
-          data.reasoning_mode || "",
-          data.reasoning_meta || null,
-        );
-        await refreshTimeline();
-      } catch (err) {
-        const stageHint = latestThinkingStepLabel ? `（当前步骤：${latestThinkingStepLabel}）` : "";
-        const message = `出错了：${err?.message || "网络错误"}${stageHint}`;
-        renderMessage("assistant", message);
-      } finally {
-        hideAssistantLoading();
-        sendBtn.disabled = false;
+      }
+
+      sendBtn.disabled = false;
+      updateSendBtnLabel();
+    }
+
+    // ── Dynamic send button label ──
+    function updateSendBtnLabel() {
+      const hasText = document.getElementById("message").value.trim().length > 0;
+      const hasFiles = selectedUploadFiles.size > 0;
+      if (hasFiles && hasText) {
+        sendBtn.textContent = "上传并发送";
+      } else if (hasFiles) {
+        sendBtn.textContent = "上传";
+      } else {
+        sendBtn.textContent = "发送";
       }
     }
 
 
 
-    document.getElementById("upload-btn").addEventListener("click", uploadFiles);
+    // ── Composer Upload Button / Panel Logic ──
+    const composerUploadTrigger = document.getElementById("composer-upload-trigger");
+    const composerUploadPanel = document.getElementById("composer-upload-panel");
+    const uploadPanelClose = document.getElementById("upload-panel-close");
+    const uploadAddMoreBtn = document.getElementById("upload-add-more-btn");
+    const uploadFileBadge = document.getElementById("upload-file-badge");
+
+    function updateUploadBadge() {
+      const count = selectedUploadFiles.size;
+      if (count > 0) {
+        uploadFileBadge.textContent = count;
+        uploadFileBadge.classList.add("on");
+      } else {
+        uploadFileBadge.classList.remove("on");
+      }
+    }
+
+    function showUploadPanel() {
+      composerUploadPanel.classList.add("on");
+    }
+
+    function hideUploadPanel() {
+      composerUploadPanel.classList.remove("on");
+    }
+
+    composerUploadTrigger.addEventListener("click", () => {
+      if (selectedUploadFiles.size > 0) {
+        // If files are already selected, toggle the panel
+        if (composerUploadPanel.classList.contains("on")) {
+          hideUploadPanel();
+        } else {
+          showUploadPanel();
+        }
+      } else {
+        // No files selected — open file picker directly
+        fileInput.click();
+      }
+    });
+
+    uploadPanelClose.addEventListener("click", () => {
+      hideUploadPanel();
+    });
+
+    uploadAddMoreBtn.addEventListener("click", () => {
+      fileInput.click();
+    });
+
     fileInput.addEventListener("change", () => {
       Array.from(fileInput.files || []).forEach((f) => {
         selectedUploadFiles.set(fileKey(f), f);
       });
       fileInput.value = "";
       renderPendingUploadFiles();
+      updateUploadBadge();
+      updateSendBtnLabel();
+      showUploadPanel();
     });
     document.getElementById("send-btn").addEventListener("click", sendMessage);
+    document.getElementById("message").addEventListener("input", updateSendBtnLabel);
+
+    // ── Quick Action Chips ──
+    function triggerQuickAction(text) {
+      const input = document.getElementById("message");
+      input.value = text;
+      updateSendBtnLabel();
+      sendMessage();
+    }
+
+    document.getElementById("qa-comprehensive").addEventListener("click", () => {
+      triggerQuickAction("[综合解读] 请综合解读我上传的所有报告和检查结果，结合时间线分析病情。");
+    });
+
+    document.getElementById("qa-risk").addEventListener("click", () => {
+      triggerQuickAction("请根据我目前的检查结果，评估当前风险等级和需要重点关注的问题。");
+    });
+
+    document.getElementById("qa-next-steps").addEventListener("click", () => {
+      triggerQuickAction("根据目前已有的检查结果，还需要补充哪些检查？下一步治疗建议是什么？");
+    });
 
 
     document.getElementById("message").addEventListener("keydown", (e) => {
       if (e.key === "Enter") sendMessage();
     });
 
-    renderMessage("assistant", "你好，我会优先参考内部医学指南，再结合你上传的病例进行带证据回答。\n\n请先上传病例文件，然后提问。")
+    // Restore chat history from session or show welcome
+    if (history.length > 0) {
+      for (let i = 0; i < history.length; i++) {
+        renderMessage(history[i].role, history[i].content);
+      }
+    } else {
+      renderMessage("assistant", "你好，我会优先参考内部医学指南，再结合你上传的病例进行带证据回答。\n\n请先上传病例文件，然后提问。");
+    }
     renderPendingUploadFiles();
+    renderSessionList();
+    document.getElementById('new-chat-btn').addEventListener('click', createNewSession);
     // Auth flow: try auto-login with saved token, or show login overlay
     tryAutoLogin();
+    // Persist on page unload
+    window.addEventListener('beforeunload', saveCurrentChatToSession);
 
   </script>
 </body>
