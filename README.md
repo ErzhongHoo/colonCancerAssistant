@@ -1,4 +1,4 @@
-<![CDATA[# 🏥 结直肠癌智能诊疗助手
+# 🏥 结直肠癌智能诊疗助手
 
 > **RAG 检索增强 × 医学时序认知 × 证据约束推理**
 
@@ -577,4 +577,4 @@ GET /api/audit/ttl-proof?session_id=<id>
 <p align="center">
   <sub>Built with ❤️ for medical AI research</sub>
 </p>
-]]>
+
