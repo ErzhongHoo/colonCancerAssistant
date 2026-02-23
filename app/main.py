@@ -3432,7 +3432,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                             f"病程摘要:\n{timeline_summary}"
                         ),
                     },
-                    {"role": "system", "content": f"以下是用户上传的所有报告/检查证据，请综合解读：\n{context}"},
+                    {"role": "system", "content": f"以下是用户上传的所有报告/检查证据（共{len(evidence_items)}条，编号为 evidence#1 至 evidence#{len(evidence_items)}），请综合解读。引用时只能使用这些编号，不要使用超出范围的编号：\n{context}"},
                 ]
             else:
                 # -- Standard RAG prompt --
@@ -3480,7 +3480,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                             "并提供最多3个可选理解方向；在澄清前不要做全面展开。"
                         ),
                     },
-                    {"role": "system", "content": f"OpenViking 检索证据（仅可依据以下内容回答）:\n{context}"},
+                    {"role": "system", "content": f"OpenViking 检索证据（共{len(evidence_items)}条，编号 evidence#1 至 evidence#{len(evidence_items)}，仅可依据以下内容回答，引用编号不得超出此范围）：\n{context}"},
                 ]
             for msg in payload.history[-8:]:
                 role = msg.get("role", "user")
@@ -3497,6 +3497,17 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
             )
             answer = _sanitize_model_disclosure(resp.choices[0].message.content or "暂无回复")
             answer = _normalize_answer_citations(answer, ranked_sources)
+            # Strip out-of-range evidence citations (LLM sometimes hallucinates high numbers)
+            max_evidence_rank = len(evidence_items)
+            def _strip_oob_citation(m: re.Match[str]) -> str:
+                try:
+                    rank = int(m.group(1))
+                except (ValueError, TypeError):
+                    return m.group(0)
+                if rank < 1 or rank > max_evidence_rank:
+                    return ""  # remove phantom citation
+                return m.group(0)
+            answer = re.sub(r"\[证据#(\d+)\]", _strip_oob_citation, answer)
             cited_sources = _extract_source_citations(answer)
             cited_ranks = _extract_evidence_ranks(answer)
             if not cited_sources and not cited_ranks:

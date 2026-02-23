@@ -1,64 +1,357 @@
-# 结直肠病例助手（RAG + 时序认知 + 证据约束）
+<![CDATA[# 🏥 结直肠癌智能诊疗助手
 
-目标：先跑通“内部指南维护 + 用户病例临时上传 -> 检索增强 -> 对话回答（科普+治疗路径建议）”。
+> **RAG 检索增强 × 医学时序认知 × 证据约束推理**
 
-## 1. 安装（uv 管理虚拟环境与依赖）
+基于大语言模型的结直肠癌智能诊疗辅助系统，融合 RAG（检索增强生成）、病程时序认知引擎和证据约束推理三大核心技术，为医患提供可靠、可追溯、隐私安全的诊疗知识问答服务。
+
+![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.129-009688?logo=fastapi&logoColor=white)
+![License](https://img.shields.io/badge/License-Academic-orange)
+
+---
+
+## 📑 目录
+
+- [系统架构](#-系统架构)
+- [核心功能](#-核心功能)
+- [环境要求](#-环境要求)
+- [安装部署](#-安装部署)
+- [配置说明](#-配置说明)
+- [启动运行](#-启动运行)
+- [内部指南维护](#-内部指南维护)
+- [API 接口参考](#-api-接口参考)
+- [项目结构](#-项目结构)
+- [演示脚本](#-演示脚本挑战杯答辩)
+- [后续规划](#-后续规划)
+
+---
+
+## 🏗 系统架构
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                     前端 (Web UI)                         │
+│  ChatGPT 风格单页对话 · 证据卡片 · 时间线可视化 · 会话管理  │
+└──────────────┬──────────────────────────────┬─────────────┘
+               │  HTTP / REST API             │
+┌──────────────▼──────────────────────────────▼─────────────┐
+│                  FastAPI 后端服务                          │
+│                                                           │
+│  ┌─────────────┐ ┌──────────────┐ ┌────────────────────┐ │
+│  │  对话引擎    │ │ 上传 & OCR   │ │  用户认证 (JWT)    │ │
+│  └──────┬──────┘ └──────┬───────┘ └────────────────────┘ │
+│         │               │                                 │
+│  ┌──────▼───────────────▼─────────────────────────────┐  │
+│  │            OpenViking 分层检索引擎                    │  │
+│  │   L0 (概览索引) → L1 (结构摘要) → L2 (原文段落)      │  │
+│  └──────┬─────────────────────────────────┬───────────┘  │
+│         │                                 │               │
+│  ┌──────▼──────┐  ┌──────────────┐  ┌────▼───────────┐  │
+│  │ 内部指南库   │  │ 用户上传临时库 │  │ 本地文献库     │  │
+│  │ (持久化)    │  │ (会话/用户级) │  │ (PubMed Agent) │  │
+│  └─────────────┘  └──────────────┘  └────────────────┘  │
+│                                                           │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────┐  │
+│  │ 时序认知引擎    │  │ 证据约束推理    │  │ 隐私脱敏    │  │
+│  │ Mamba/SSM 编码 │  │ Evidence Guard │  │ & 审计日志  │  │
+│  └────────────────┘  └────────────────┘  └────────────┘  │
+└──────────────────────────────────────────────────────────┘
+```
+
+---
+
+## ✨ 核心功能
+
+### 🔍 双库 RAG 检索增强
+- **内部指南库**（持久化）：导入 CSCO/NCCN 等权威指南，长期保存
+- **用户上传库**（会话/用户级）：上传 PDF / 图片 / txt 报告，支持登录用户持久化或游客会话临时存储
+- 对话检索链路基于 **OpenViking 分层检索引擎**，回答前必须先检索证据
+
+### 🧠 医学时序认知引擎
+- 上传病例后自动抽取病程事件（检验、分期、治疗事件）
+- 通过 **Mamba 状态空间模型**（可回退 SSM/Linear）聚合风险评分
+- 时序编码驱动检索路由提示，提升检索精准度
+
+### 🛡 证据约束推理
+- 关键结论绑定证据编号（如 `[证据#1]`），映射到可展开证据片段
+- 服务端返回 `evidence_guard` 校验结果（`coverage`、`verified_claims`、`unsupported_claims`）
+- 证据不足时明确提示，并给出补充检索关键词
+
+### 🔒 隐私安全与审计
+- 上传文本自动脱敏（手机号 / 身份证号 / 邮箱 / 银行卡 / 姓名 / 地址）
+- 会话隔离 + TTL 到期自动清理
+- `audit_log.jsonl` 完整审计链路，支持 TTL 过期销毁证明查询
+
+### 📚 本地文献 Agent
+- 增量抓取 PubMed 论文 → 医学肿瘤过滤 → 结构化 → 向量入库
+- 支持后台定时刷新（默认 24h）或手动触发
+- 检索返回文献类型、年份、venue、DOI 等结构化信息
+
+### 👤 用户认证系统
+- SQLite + JWT 无状态认证，服务器重启不丢失登录态
+- 支持注册、登录、修改用户名、数据管理、账户注销
+- 每用户独立数据目录隔离
+
+---
+
+## 📋 环境要求
+
+| 组件 | 要求 | 说明 |
+|------|------|------|
+| **Python** | ≥ 3.11 | 推荐使用 3.11 |
+| **包管理器** | [uv](https://docs.astral.sh/uv/) | 推荐；也可使用 `pip` |
+| **操作系统** | Linux / macOS / Windows | Linux 推荐 |
+| **API Key** | 阿里云百炼 API Key | 用于 LLM、Embedding、OCR 等 |
+| **磁盘空间** | ≥ 500 MB | 含向量索引和文献库 |
+
+### 可选依赖
+
+| 组件 | 用途 | 安装条件 |
+|------|------|----------|
+| **PaddleOCR** | 本地 OCR 引擎 | 需要本地 OCR 时安装 |
+| **PaddlePaddle** | PaddleOCR 后端 | 配合 PaddleOCR 使用 |
+
+---
+
+## 🚀 安装部署
+
+### 方式一：使用 uv（推荐）
 
 ```bash
+# 1. 克隆项目
+git clone <your-repo-url>
+cd colon_cancer_research_v3_colon
+
+# 2. 创建虚拟环境
 uv venv --python 3.11 .venv
+
+# 3. 安装依赖
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
-如需启用本地 OCR（PaddleOCR），还需要安装 `paddlepaddle`（CPU 版示例）：
+### 方式二：使用 pip
 
 ```bash
+# 1. 克隆项目
+git clone <your-repo-url>
+cd colon_cancer_research_v3_colon
+
+# 2. 创建虚拟环境
+python3.11 -m venv .venv
+source .venv/bin/activate   # Linux/macOS
+# .venv\Scripts\activate    # Windows
+
+# 3. 安装依赖
+pip install -r requirements.txt
+```
+
+### 安装本地 OCR（可选）
+
+如需启用 PaddleOCR 本地识别：
+
+```bash
+# 使用 uv
 uv pip install --python .venv/bin/python paddlepaddle
+
+# 或使用 pip
+pip install paddlepaddle
 ```
 
-## 2. 配置
+> **提示**：如不安装 PaddleOCR，系统会自动回退到阿里云在线 OCR 或视觉模型 OCR。
 
-1. 将 `.env.example` 复制为 `.env`
-2. 填入你的阿里云百炼 API Key（已兼容 `DASHSCOPE_API_KEY` / `BAILIAN_API_KEY`）
+---
 
-## 3. 启动
+## ⚙ 配置说明
+
+### 基本配置
+
+1. 将 `.env.example` 复制为 `.env`：
 
 ```bash
-uv run --python .venv/bin/python uvicorn app.main:app --reload --port 8000
+cp .env.example .env
 ```
 
-打开 `http://127.0.0.1:8000`
+2. 编辑 `.env` 文件，填入必要配置。
 
-## 4. 系统能力
+### 环境变量详解
 
-- 内部 RAG（持久化）：指南/共识文档入库后长期保存
-- 外部 RAG（临时会话）：用户上传 PDF / 图片 / txt 报告，仅当前页面会话有效
-- 对话检索链路已切换为 **OpenViking-only**：回答前必须先 `search/find`，并仅基于 OpenViking 证据作答
-- 外部上传自动脱敏（手机号/身份证号/邮箱/银行卡/姓名字段/地址字段）
-- 自动抽取文本（图片支持本地 PaddleOCR / 百炼在线 OCR / 多模态视觉 OCR；扫描版 PDF 会自动 OCR 兜底）
-- 文本切片 + Embedding + 向量检索（向量库抽象层，当前默认 `local_json`）
-- ChatGPT 风格单页对话
-- 回答采用“关键主张引用”策略：仅在关键结论/关键数字处标注少量证据（如 `[证据#1]`），详细来源在证据卡片查看
-- 回答结构按问题复杂度自适应（简单问题直答，复杂问题再结构化），不固定“三段式”模板
-- 患者病程时间线抽取与线性状态编码（`risk_level/risk_score`）
-- 证据不足时会明确说明“证据不足”，并在必要时给出补充检索关键词
-- 隐私审计日志（上传处理、聊天检索、TTL 过期销毁证明）
+#### 🔑 必需配置
 
-## 5. 挑战杯增强点（可演示实物）
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DASHSCOPE_API_KEY` | — | 阿里云百炼 API Key（**必填**，也支持 `BAILIAN_API_KEY` / `APIKEY` / `apikey`） |
+| `JWT_SECRET` | 自动生成 | JWT 签名密钥（**生产环境必填**，否则每次重启后用户需重新登录） |
 
-- 医学时序认知引擎：
-  - 上传病例后自动抽取病程事件（检验、分期、治疗事件）
-  - 通过线性状态编码聚合风险，驱动检索路由提示
-- 因果/证据约束推理（工程版）：
-  - 关键结论应绑定证据编号（如 `[证据#1]`），并可映射到下方可展开证据片段
-  - 服务端返回 `evidence_guard` 结果（`coverage`、`verified_claims`、`unsupported_claims`）
-- 隐私沙箱可验证闭环：
-  - 会话隔离、TTL 到期自动清理
-  - `audit_log.jsonl` 记录过期销毁事件，可通过接口查询“TTL 证明”
+#### 🤖 模型配置
 
-## 6. 内部指南维护
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | API 基础 URL |
+| `CHAT_MODEL` | `qwen-plus` | 对话模型 |
+| `VISION_MODEL` | `qwen-vl-max` | 多模态视觉模型 |
+| `EMBEDDING_MODEL` | `text-embedding-v3` | 向量嵌入模型 |
 
-1. 将指南文件放到 `data/guidelines/`（支持 PDF / 图片 / txt）
-2. 触发导入：
+#### 📷 OCR 配置
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `OCR_PROVIDER` | `auto` | OCR 引擎：`auto`（自动选择）/ `paddle` / `aliyun` / `vision` |
+| `PADDLE_OCR_LANG` | `ch` | PaddleOCR 语言包 |
+| `ALIYUN_OCR_MODEL` | `qwen-vl-ocr-latest` | 百炼在线 OCR 模型 |
+| `ALIYUN_OCR_MIN_PIXELS` | `3072` | 在线 OCR 最小像素约束（0 表示不设置） |
+| `ALIYUN_OCR_MAX_PIXELS` | `8388608` | 在线 OCR 最大像素约束（0 表示不设置） |
+| `PDF_OCR_MAX_PAGES` | `500` | 扫描版 PDF 的 OCR 最大页数 |
+
+> **OCR 引擎选择优先级**（`auto` 模式）：PaddleOCR → 百炼在线 OCR → 视觉模型 OCR
+
+#### 🔐 安全与隐私配置
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `ENABLE_UPLOAD_DEID` | `true` | 是否对上传文本自动脱敏 |
+| `SAVE_UPLOAD_ORIGINALS` | `false` | 是否保存上传原件（用于抽取对照与审计） |
+| `SESSION_TTL_SECONDS` | `1800` | 游客会话过期时间（秒） |
+| `MANUAL_SESSION_CLEAR_ONLY` | `true` | 仅手动清除会话数据（默认开启） |
+| `INTERNAL_RAG_TOKEN` | 空 | 内部指南导入接口令牌（可选） |
+| `JWT_EXPIRE_SECONDS` | `604800` | JWT 令牌过期时间（默认 7 天） |
+
+#### 🧬 时序认知引擎配置
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `TIMELINE_ENCODER` | `mamba` | 病程状态编码器：`mamba` / `ssm` / `linear` |
+| `MAMBA_MODEL_PATH` | `models/mamba_timeline_v1.npz` | Mamba 编码器权重路径（不存在时自动初始化） |
+| `ENABLE_LLM_TIMELINE` | `true` | 是否启用 LLM 辅助时间线抽取 |
+| `ENABLE_IMAGE_DATE_VLM` | `true` | 是否用视觉模型提取图片中的日期 |
+
+#### 🗂 OpenViking 检索配置
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `OPENVIKING_NATIVE_ENABLED` | `true` | 启用官方 OpenViking SDK 作为主检索通道 |
+| `OPENVIKING_NATIVE_STORAGE_PATH` | `./data/openviking_native` | OpenViking 本地存储目录 |
+| `OPENVIKING_NATIVE_AGFS_PORT` | `1833` | 内嵌 AGFS 端口（多实例需错开） |
+| `OPENVIKING_RAG_L1_BUDGET` | `6` | 默认 L1 概览读取数量 |
+| `OPENVIKING_RAG_L2_BUDGET` | `2` | 默认 L2 原文读取数量 |
+| `OPENVIKING_RAG_DEEP_L1_BUDGET` | `10` | 深入模式 L1 预算 |
+| `OPENVIKING_RAG_DEEP_L2_BUDGET` | `4` | 深入模式 L2 预算 |
+| `OPENVIKING_INTERNAL_COMPLEX_SEARCH` | `false` | 内部库复杂问题是否启用 `search` |
+| `OPENVIKING_LEGACY_DUAL_WRITE` | `false` | 是否同时写入旧版存储 |
+
+#### 📚 文献 Agent 配置
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `ENABLE_LOCAL_LITERATURE_AGENT` | `true` | 启用后台本地论文 Agent |
+| `LITERATURE_AGENT_TOPIC_QUERY` | 结直肠癌相关关键词 | Agent 跟踪检索主题 |
+| `LITERATURE_AGENT_BOOTSTRAP_MAX_RESULTS` | `120` | 单次增量更新抓取上限 |
+| `LITERATURE_AGENT_REFRESH_HOURS` | `24` | 自动刷新间隔（小时） |
+| `ENABLE_WEB_LITERATURE` | `false` | 是否启用联网检索兜底 |
+| `LITERATURE_PROVIDER` | `pubmed` | 学术来源 |
+| `LITERATURE_TOP_K` | `8` | 每轮检索返回条数 |
+| `LITERATURE_TIMEOUT_SECONDS` | `8` | 联网检索超时（秒） |
+| `LITERATURE_MEDICAL_ONCOLOGY_ONLY` | `true` | 仅保留医学肿瘤文献 |
+| `LITERATURE_MIN_RELEVANCE` | `0.18` | 最低相关性阈值 |
+
+#### 🔧 其他配置
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `VECTOR_BACKEND` | `local_json` | 向量存储后端（当前默认本地 JSON） |
+| `CHAT_COMPLETION_TIMEOUT_SECONDS` | `120` | 对话生成超时（设为 `0` 或 `none` 禁用） |
+| `EMBED_CACHE_MAX` | `2048` | 全局 Embedding 缓存条目上限 |
+
+### `.env` 示例
+
+```env
+# ==================== 必填 ====================
+DASHSCOPE_API_KEY=your_api_key_here
+JWT_SECRET=your_strong_random_secret_here
+
+# ==================== 模型 ====================
+CHAT_MODEL=qwen-plus
+VISION_MODEL=qwen-vl-max
+EMBEDDING_MODEL=text-embedding-v3
+
+# ==================== OCR ====================
+OCR_PROVIDER=auto
+PADDLE_OCR_LANG=ch
+
+# ==================== 安全 ====================
+ENABLE_UPLOAD_DEID=true
+SAVE_UPLOAD_ORIGINALS=false
+INTERNAL_RAG_TOKEN=
+
+# ==================== 时序引擎 ====================
+TIMELINE_ENCODER=mamba
+
+# ==================== 文献 Agent ====================
+ENABLE_LOCAL_LITERATURE_AGENT=true
+LITERATURE_PROVIDER=pubmed
+LITERATURE_MEDICAL_ONCOLOGY_ONLY=true
+
+# ==================== 认证 ====================
+JWT_EXPIRE_SECONDS=604800
+```
+
+> 💡 **生成安全的 JWT 密钥**：
+> ```bash
+> python3 -c "import secrets; print(secrets.token_hex(32))"
+> ```
+
+---
+
+## 🟢 启动运行
+
+### 开发模式（推荐）
+
+```bash
+# 使用 uv
+uv run --python .venv/bin/python uvicorn app.main:app --reload --port 8000
+
+# 或者激活虚拟环境后
+source .venv/bin/activate
+uvicorn app.main:app --reload --port 8000
+```
+
+### 生产模式
+
+```bash
+# 多 Worker 模式（根据 CPU 核心数调整）
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
+### 访问应用
+
+启动后打开浏览器访问：
+
+```
+http://127.0.0.1:8000
+```
+
+即可进入 ChatGPT 风格的对话界面。
+
+### 首次启动检查清单
+
+1. ✅ `.env` 中填入了有效的 `DASHSCOPE_API_KEY`
+2. ✅ `.env` 中设置了 `JWT_SECRET`（生产环境）
+3. ✅ 依赖已安装（`requirements.txt` 中的所有包）
+4. ✅ `data/` 目录可写（应用会在此目录自动创建数据库和索引文件）
+
+---
+
+## 📖 内部指南维护
+
+### 1. 放置指南文件
+
+将指南文件放到 `data/guidelines/` 目录，支持以下格式：
+- PDF 文档
+- 图片文件（JPG / PNG 等）
+- TXT 文本
+
+### 2. 触发导入
+
+#### 方式一：API 触发
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/api/internal/import-guidelines" \
@@ -66,163 +359,133 @@ curl -X POST "http://127.0.0.1:8000/api/internal/import-guidelines" \
   -d '{"reset": true}'
 ```
 
-- `reset: true` 表示重建内部指南库（推荐）
-- 如果设置了 `INTERNAL_RAG_TOKEN`，需额外加请求头：`X-Internal-Token: <token>`
-- 也可以直接在首页左侧“内部维护”卡片里点击“导入内部指南”（支持填写令牌和选择是否 reset）
+- `reset: true`：重建内部指南库（推荐首次使用）
+- 如设置了 `INTERNAL_RAG_TOKEN`，需额外加请求头：`X-Internal-Token: <token>`
 
-## 7. 新增 API（增强能力）
+#### 方式二：Web UI
 
-- `POST /api/literature/refresh?force=true&max_results=120`
-  - 执行“阶段1-4”本地论文Agent流程：增量抓取 PubMed -> 医学肿瘤过滤 -> 结构化 -> 写入本地文献向量库
-- `GET /api/literature/search?q=<query>&top_k=5`
-  - 优先检索本地文献库（后台Agent每日可增量更新），无结果时可按配置回退联网
-  - 返回文献类型（clinical_trial/meta_or_systematic_review/guideline/...）、年份、venue、doi、url、relevance
+在首页左侧"内部维护"面板中点击 **"导入内部指南"**，支持填写令牌和选择是否 reset。
 
-- `GET /api/session/timeline`
-  - 返回当前会话病程事件、时序编码状态和摘要
-- `GET /api/upload/debug?source=<filename>&reextract=false`
-  - 返回某个上传源的原件保存状态、抽取文本片段、时间线事件、L1/L0（用于排查抽取偏差）
-  - 当 `reextract=true` 时会基于已保存原件重新抽取并对比当前入库文本
-- `GET /api/audit/recent?limit=50`
-  - 返回最近审计日志
-- `GET /api/audit/ttl-proof?session_id=<id>`
-  - 返回 TTL 过期清理证明事件
-- `POST /api/chat`
-  - 额外返回 `timeline_state`、`timeline_summary`、`retrieval_hint`、`evidence_guard`
-  - 当证据不足时会明确返回“证据不足”并给出下一步检索关键词
+---
 
-## 8. 关键配置
+## 📡 API 接口参考
 
-- `VECTOR_BACKEND=local_json`：用于上传切片缓存（对话检索主链路已改为 OpenViking）
-- `ENABLE_UPLOAD_DEID=true`：是否对外部用户上传文本先脱敏再入库
-- `SAVE_UPLOAD_ORIGINALS=false`：是否落盘保存用户上传原件（用于抽取对照与审计排查）
-- `OCR_PROVIDER=auto|paddle|aliyun|vision`：OCR 引擎选择（默认 `auto`，顺序为 PaddleOCR -> 百炼在线 OCR -> 视觉模型）
-- `PADDLE_OCR_LANG=ch`：PaddleOCR 语言包
-- `ALIYUN_OCR_MODEL=qwen-vl-ocr-latest`：百炼在线 OCR 模型
-- `ALIYUN_OCR_MIN_PIXELS=3072`：在线 OCR 最小像素约束（0 表示不设置）
-- `ALIYUN_OCR_MAX_PIXELS=8388608`：在线 OCR 最大像素约束（0 表示不设置）
-- 内部指南导入会自动使用“逐字转写”OCR策略，避免被“检验项模板”误抽取
-- `PDF_OCR_MAX_PAGES=500`：扫描版 PDF 的 OCR 最大页数
-- `SESSION_TTL_SECONDS=1800`：用户会话临时库过期时间（秒，手动清除模式下仅保留配置）
-- `MANUAL_SESSION_CLEAR_ONLY=true`：仅手动清除会话数据（默认开启）
-- `INTERNAL_RAG_TOKEN=`：内部导入接口令牌（可选）
-- `TIMELINE_ENCODER=linear|ssm|mamba`：病程状态编码器（默认 `mamba`，支持 `linear`、`ssm` 回退）
-- `MAMBA_MODEL_PATH=models/mamba_timeline_v1.npz`：Mamba 编码器权重路径（不存在时会自动初始化 bootstrap 权重）
-- `ENABLE_LOCAL_LITERATURE_AGENT=true`：启用后台本地论文Agent（推荐）
-- `LITERATURE_AGENT_TOPIC_QUERY=...`：后台Agent跟踪主题（建议限定到结直肠肿瘤）
-- `LITERATURE_AGENT_BOOTSTRAP_MAX_RESULTS=120`：单次增量更新抓取上限
-- `LITERATURE_AGENT_REFRESH_HOURS=24`：本地文献库自动刷新间隔（小时）
-- `ENABLE_WEB_LITERATURE=false`：是否启用联网检索兜底
-- `LITERATURE_PROVIDER=pubmed`：学术来源（默认仅医学数据库 PubMed）
-- `LITERATURE_TOP_K=8`：每轮检索返回目标条数（动态返回，不再强制5条）
-- `LITERATURE_TIMEOUT_SECONDS=8`：联网检索超时时间（秒）
-- `LITERATURE_MEDICAL_ONCOLOGY_ONLY=true`：仅保留医学肿瘤文献
-- `LITERATURE_MIN_RELEVANCE=0.18`：最低相关性阈值（低于阈值直接丢弃）
-- `AUTO_EVIDENCE_REWRITE=true`：旧链路参数（OpenViking-only 对话路径下不生效）
-- `EVIDENCE_REWRITE_MIN_COVERAGE=0.75`：旧链路参数（OpenViking-only 对话路径下不生效）
-- `EVIDENCE_REWRITE_MAX_UNSUPPORTED=1`：旧链路参数（OpenViking-only 对话路径下不生效）
-- `OPENVIKING_NATIVE_ENABLED=true`：启用官方 OpenViking SDK 作为分层检索主通道（异常时自动回退本地实现）
-- `OPENVIKING_NATIVE_STORAGE_PATH=./data/openviking_native`：官方 OpenViking 本地存储目录
-- `OPENVIKING_NATIVE_AGFS_PORT=1833`：官方 OpenViking 内嵌 AGFS 端口（多实例部署时需错开）
-- `OPENVIKING_LEGACY_DUAL_WRITE=false`：是否同时写入 `openviking_layers.json`（默认关闭以减少重复存储；native 失败时仍会自动回退写入）
-- `OPENVIKING_RAG_L1_BUDGET=6`：默认最多读取 L1 概览数量
-- `OPENVIKING_RAG_L2_BUDGET=2`：默认最多读取 L2 原文数量
-- `OPENVIKING_RAG_DEEP_L1_BUDGET=10`：用户要求深入时的 L1 预算
-- `OPENVIKING_RAG_DEEP_L2_BUDGET=4`：用户要求深入时的 L2 预算
-- `OPENVIKING_INTERNAL_COMPLEX_SEARCH=false`：内部库是否在复杂问题下启用 `search`（默认关闭，优先走更快的 `find` 以降低 `internal (1/2)` 等待时间）
-- `JWT_SECRET=<your_secret>`：JWT 签名密钥（详见下方认证章节）
-- `JWT_EXPIRE_SECONDS=604800`：JWT 令牌过期时间（默认 7 天）
-
-## 8.1 用户认证与数据库
-
-### 技术方案
-
-系统采用 **SQLite + JWT** 实现用户认证：
-
-| 组件 | 技术 | 说明 |
-|---|---|---|
-| 用户数据存储 | **SQLite** | 嵌入式数据库，无需单独安装或启动服务 |
-| 认证令牌 | **JWT (JSON Web Token)** | 无状态令牌，服务器重启后登录状态不丢失 |
-| 密码安全 | SHA-256 + per-user salt | 每个用户独立的随机盐值 |
-| 用户数据 | 文件系统 | 每个用户独立目录 `data/user_data/{user_id}/` |
-
-### 数据库说明
-
-SQLite 是**嵌入式数据库**，不需要单独安装或启动数据库服务器：
-
-- 数据库文件位于 `data/users.db`，应用启动时自动创建
-- Python 标准库自带 `sqlite3` 模块，**零额外依赖**
-- 使用 WAL 模式支持并发读写
-
-### JWT 配置
-
-在 `.env` 中配置 JWT 相关参数：
-
-```env
-# JWT 签名密钥（必须设置，否则每次重启会自动生成新密钥，导致已有令牌失效）
-JWT_SECRET=your_strong_random_secret_here
-
-# JWT 令牌过期时间，单位秒（默认 604800 = 7天）
-JWT_EXPIRE_SECONDS=604800
-```
-
-> **注意**：生产环境中请务必在 `.env` 中设置一个强随机密钥作为 `JWT_SECRET`。如果未设置，系统会在启动时自动生成一个临时密钥，但每次重启后所有用户都需要重新登录。
->
-> 可以用以下命令生成一个安全的密钥：
-> ```bash
-> python3 -c "import secrets; print(secrets.token_hex(32))"
-> ```
-
-### 从旧版本升级
-
-如果你之前使用了旧版（JSON 文件存储 + 内存 Token），升级时系统会**自动完成数据迁移**：
-
-1. 首次启动时，检测到 `data/users.json` 文件存在
-2. 自动将所有用户数据迁移到 `data/users.db`（SQLite）
-3. 旧文件重命名为 `data/users.json.migrated`（作为备份）
-4. 迁移完成后，后续启动不再触发迁移
-
-> **注意**：旧版的内存 Token 无法迁移（它们本来就不持久化），升级后所有用户需要重新登录。
-
-### 认证 API
+### 对话 & 聊天
 
 | 接口 | 方法 | 说明 |
-|---|---|---|
-| `/api/auth/register` | POST | 注册新用户，返回 JWT 令牌 |
-| `/api/auth/login` | POST | 用户登录，返回 JWT 令牌 |
-| `/api/auth/logout` | POST | 登出（客户端清除令牌即可） |
-| `/api/auth/me` | GET | 获取当前登录用户信息和数据统计 |
-| `/api/user/change-username` | POST | 修改当前登录用户的用户名 |
-| `/api/user/delete-data` | POST | 清除当前用户的所有上传数据 |
-| `/api/user/delete-account` | POST | 注销账户（永久删除） |
-| `/api/user/delete-upload` | POST | 删除指定上传文件的数据 |
-| `/api/upload/debug` | GET | 查询指定上传源的“原件-抽取-L1/L0”对照信息（登录用户与会话均可用） |
+|------|------|------|
+| `/api/chat` | POST | 主对话接口，返回回答、证据、时间线状态、evidence_guard 等 |
+| `/api/chat/progress` | GET | 查询对话进度状态 |
 
-所有需要认证的接口通过 `Authorization: Bearer <token>` 请求头传递 JWT 令牌。
+### 文件上传
 
-## 9. 当前已完成
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/upload` | POST | 上传文件（PDF / 图片 / txt），自动 OCR + 切片 + 入库 |
+| `/api/upload/debug` | GET | 查询上传源的原件/抽取文本/时间线对照信息 |
 
-- 已接入阿里云百炼兼容 OpenAI API（对话、向量、视觉）
-- `.env` 支持 `DASHSCOPE_API_KEY` / `BAILIAN_API_KEY` / `APIKEY` / `apikey`
-- 修复 `favicon.ico` 404 噪声日志
-- 上传接口支持单文件容错，失败会返回具体错误原因
-- 兼容部分浏览器图片上传的 `application/octet-stream` MIME
-- 内外双库架构：内部持久化 + 用户临时会话（刷新页面后用户资料自动失效）
-- 外部上传自动脱敏并返回脱敏命中统计
-- 已完成 Git 初始化与首个提交（`20347ca`）
+### 文献检索
 
-## 10. 演示脚本（挑战杯答辩）
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/literature/refresh` | POST | 执行本地论文 Agent 增量更新（参数：`force`, `max_results`） |
+| `/api/literature/search` | GET | 检索本地文献库（参数：`q`, `top_k`） |
 
-1. 上传 1 份随访报告 + 1 份病理报告，展示：
-   - 上传脱敏命中统计
-   - 自动提取病程时间线和风险状态
-2. 提问“目前分期风险如何，下一步治疗路径建议？”
-   - 展示回答中的 `[证据#n]` 标注
-   - 展示 `evidence_guard.coverage` 与失败 claim
-3. 等待会话过期或手动触发过期场景后，查询：
-   - `GET /api/audit/ttl-proof` 显示会话销毁审计证据
+### 时间线
 
-## 12. 一键跑完阶段1-4
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/session/timeline` | GET | 返回当前会话病程事件、时序编码和摘要 |
+
+### 审计
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/audit/recent` | GET | 返回最近审计日志（参数：`limit`） |
+| `/api/audit/ttl-proof` | GET | 返回 TTL 过期清理证明（参数：`session_id`） |
+
+### 用户认证
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/auth/register` | POST | 注册新用户 |
+| `/api/auth/login` | POST | 用户登录 |
+| `/api/auth/logout` | POST | 登出 |
+| `/api/auth/me` | GET | 获取当前用户信息 |
+
+### 用户管理
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/user/change-username` | POST | 修改用户名 |
+| `/api/user/delete-data` | POST | 清除用户上传数据 |
+| `/api/user/delete-upload` | POST | 删除指定上传文件 |
+| `/api/user/delete-account` | POST | 注销账户（永久） |
+
+### 会话管理
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/sessions` | GET | 获取用户历史会话列表 |
+| `/api/sessions/new` | POST | 创建新会话 |
+| `/api/session/clear` | POST | 清除当前会话数据 |
+
+### 内部维护
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/internal/import-guidelines` | POST | 导入内部指南（参数：`reset`） |
+
+> **认证说明**：需要登录的接口通过 `Authorization: Bearer <token>` 请求头传递 JWT 令牌。
+
+---
+
+## 📂 项目结构
+
+```
+colon_cancer_research_v3_colon/
+├── app/                          # 后端核心代码
+│   ├── main.py                   # FastAPI 主入口 & 路由定义
+│   ├── auth.py                   # 用户认证（SQLite + JWT）
+│   ├── audit.py                  # 审计日志模块
+│   ├── evidence_guard.py         # 证据约束校验
+│   ├── literature_agent.py       # 本地文献 Agent（PubMed 增量抓取）
+│   ├── literature_search.py      # 文献检索逻辑
+│   ├── llm.py                    # LLM / Embedding / OCR 调用封装
+│   ├── mamba_encoder.py          # Mamba 状态空间模型编码器
+│   ├── ssm_encoder.py            # SSM 编码器（回退方案）
+│   ├── ocr.py                    # PaddleOCR 本地 OCR 封装
+│   ├── openviking.py             # OpenViking 分层检索引擎
+│   ├── privacy.py                # 隐私脱敏处理
+│   ├── rag.py                    # 文本切片 & 检索链路
+│   ├── timeline.py               # 病程时间线抽取 & 编码
+│   └── vector_store.py           # 向量存储抽象层
+├── web/                          # 前端页面
+│   ├── index.html                # 主界面（ChatGPT 风格对话 UI）
+│   └── admin.html                # 管理页面
+├── data/                         # 数据目录（运行时生成）
+│   ├── guidelines/               # 内部指南文件存放
+│   ├── openviking_native/        # OpenViking 本地索引
+│   ├── user_data/                # 用户数据目录（按用户隔离）
+│   ├── users.db                  # 用户数据库（SQLite，自动创建）
+│   ├── audit_log.jsonl           # 审计日志
+│   ├── literature_store.jsonl    # 结构化文献库
+│   └── literature_vector_store.json  # 文献向量索引
+├── models/                       # 模型权重
+│   └── mamba_timeline_v1.npz     # Mamba 时序编码器权重
+├── docs/                         # 文档资料
+│   └── architecture/             # 系统架构图（Mermaid / PNG / PDF）
+├── .env.example                  # 环境变量模板
+├── .env                          # 环境变量（不纳入版本控制）
+├── requirements.txt              # Python 依赖清单
+└── README.md                     # 项目说明
+```
+
+---
+
+## 📚 一键构建本地文献库
+
+运行以下命令执行"增量抓取 PubMed → 医学肿瘤过滤 → 结构化 → 向量入库"全流程：
 
 ```bash
 uv run --python .venv/bin/python -m app.literature_agent \
@@ -231,15 +494,87 @@ uv run --python .venv/bin/python -m app.literature_agent \
 ```
 
 执行后会产出：
-- `data/literature_store.jsonl`（结构化文献库）
-- `data/literature_vector_store.json`（文献向量索引）
-- `data/literature_agent_state.json`（增量状态）
+- `data/literature_store.jsonl` — 结构化文献库
+- `data/literature_vector_store.json` — 文献向量索引
+- `data/literature_agent_state.json` — 增量状态记录
 
-## 11. 后续可扩展
+---
 
-- 切到正式向量数据库（Milvus / pgvector / Elasticsearch）
-- ~~增加用户身份与隐私隔离~~ 已完成（SQLite + JWT 认证）
-- JWT Token 黑名单机制（支持主动吊销令牌）
-- 升级到 PostgreSQL 等生产级数据库（当前 SQLite 适用于中小规模）
-- 增加多轮病程“时间线”结构化抽取
-- 后续再加 LoRA 或私有微调模型
+## 🎤 演示脚本（挑战杯答辩）
+
+### 步骤 1：上传病例
+
+上传 1 份随访报告 + 1 份病理报告，展示：
+- ✅ 上传自动脱敏命中统计
+- ✅ 自动提取病程时间线和风险状态
+
+### 步骤 2：智能问答
+
+提问 *"目前分期风险如何，下一步治疗路径建议？"*
+
+展示：
+- ✅ 回答中的 `[证据#n]` 引用标注
+- ✅ `evidence_guard.coverage` 与失败 claim 分析
+
+### 步骤 3：隐私审计
+
+等待会话过期或手动清除后，查询：
+
+```bash
+GET /api/audit/ttl-proof?session_id=<id>
+```
+
+展示：
+- ✅ 会话销毁审计证据（TTL 过期证明）
+
+---
+
+## 🗃 用户认证与数据库
+
+### 技术方案
+
+| 组件 | 技术 | 说明 |
+|------|------|------|
+| 用户数据存储 | **SQLite** | 嵌入式数据库，零额外依赖 |
+| 认证令牌 | **JWT** | 无状态令牌，重启后不丢失 |
+| 密码安全 | SHA-256 + per-user salt | 每用户独立随机盐值 |
+| 用户数据 | 文件系统 | 每用户独立目录 `data/user_data/{user_id}/` |
+
+### 数据库说明
+
+- 数据库文件 `data/users.db`，应用启动时**自动创建**
+- Python 标准库自带 `sqlite3` 模块，**无需额外安装**
+- 使用 WAL 模式支持并发读写
+
+### 从旧版本升级
+
+如之前使用 JSON 文件存储，系统会**自动迁移**：
+1. 首次启动检测到 `data/users.json`
+2. 自动迁移到 `data/users.db`
+3. 旧文件重命名为 `data/users.json.migrated`
+
+> 旧版内存 Token 无法迁移，升级后需重新登录。
+
+---
+
+## 🗺 后续规划
+
+- [ ] 切换到生产级向量数据库（Milvus / pgvector / Elasticsearch）
+- [x] ~~用户身份与隐私隔离~~ ✅ 已完成（SQLite + JWT）
+- [ ] JWT Token 黑名单机制（支持主动吊销令牌）
+- [ ] 升级到 PostgreSQL 等生产级数据库
+- [ ] 增强多轮病程"时间线"结构化抽取
+- [ ] LoRA / 私有微调模型适配
+
+---
+
+## 📄 许可证
+
+本项目为学术研究用途，仅供内部使用和学习交流。
+
+---
+
+<p align="center">
+  <sub>Built with ❤️ for medical AI research</sub>
+</p>
+]]>
