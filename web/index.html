@@ -3366,7 +3366,7 @@
       currentUser = null;
       localStorage.removeItem('auth_token');
       isGuest = true;
-      renderUserPanel();
+      location.reload();
     }
 
     async function openAccountModal() {
@@ -3633,7 +3633,33 @@
         const rendered = buildSourceInlineCitation(rawSource, kind);
         return rendered || match;
       });
-      // Replace [证据#N] with clickable link
+
+      // --- Pre-process: expand compound evidence citations ---
+      // Handles: [evidence#2, #25-27], [evidence#4, #5, #8, #11等], [证据#5, #6]
+      html = html.replace(/\[(?:证据|evidence)\s*#\s*(\d+(?:\s*[-–]\s*\d+)?(?:\s*[,，]\s*#?\s*\d+(?:\s*[-–]\s*\d+)?)*)(?:\s*等)?\]/gi, (match, inner) => {
+        // Parse all number tokens (possibly ranges like 25-27)
+        const parts = inner.split(/[,，]/);
+        const nums = [];
+        for (const part of parts) {
+          const trimmed = part.replace(/#/g, '').trim();
+          const rangeMatch = trimmed.match(/^(\d+)\s*[-–]\s*(\d+)$/);
+          if (rangeMatch) {
+            const start = parseInt(rangeMatch[1], 10);
+            const end = parseInt(rangeMatch[2], 10);
+            for (let i = start; i <= end && i < start + 20; i++) {
+              nums.push(i);
+            }
+          } else {
+            const n = parseInt(trimmed, 10);
+            if (!isNaN(n)) nums.push(n);
+          }
+        }
+        if (nums.length === 0) return match;
+        // Expand into individual [evidence#N] tags so the next regex picks them up
+        return nums.map(n => `[evidence#${n}]`).join('');
+      });
+
+      // Replace [证据#N] / [evidence#N] with clickable link (single citations)
       html = html.replace(/\[(?:证据|evidence)\s*#\s*(\d+)(?:@([A-Za-z0-9?_+\-]+))?\]/gi, (match, num, layer) => {
         const anchorId = `ev-${msgId}-${num}`;
         const layerTag = String(layer || "").trim();

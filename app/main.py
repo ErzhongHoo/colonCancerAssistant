@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
@@ -709,9 +709,17 @@ def _resolve_source_from_viking_uri(
     # viking://resources/internal-guidelines/internal/README_COLON.md
     m = re.search(r"(?:^|/)internal/(.+)$", relative)
     if m:
-        rel = str(m.group(1) or "").strip().lstrip("/\\")
+        rel = unquote(str(m.group(1) or "").strip().lstrip("/\\"))
         if rel:
             return f"internal/{rel}"
+
+    # Fallback for session resources
+    m2 = re.search(r"(?:^|/)session/(.+)$", relative)
+    if m2:
+        rel = unquote(str(m2.group(1) or "").strip().lstrip("/\\"))
+        if rel:
+            return f"session/{rel}"
+
     return ""
 
 
@@ -1836,17 +1844,20 @@ def _build_response_style_hint(query: str, reasoning_mode: str, history: list[di
     )
     if not needs_structured:
         return (
-            "输出风格：当前问题偏简单，请直接自然回答，控制在1-2段内。"
-            "不要加固定标题，不要硬分“结论/依据/下一步”。"
+            "输出风格：直接自然回答，控制在1-2段内。"
+            "不要加固定标题，不要硬分结论/依据/下一步。"
+            "不要使用任何 emoji。不要讨论临界/边缘值。"
             "若需给出证据，仅为关键结论添加少量[证据#N]。"
-            "除非用户明确要求或确有必要，不要给“下一步建议”。"
+            "正常指标不要逐项列出。"
         )
     return (
-        "输出风格：按任务复杂度自适应组织内容。"
-        "先回答用户最关心的问题，再补充必要背景。"
-        "可使用少量小标题或要点帮助阅读，但不要固定成同一模板。"
-        "不要为每一句都加证据标签；只给关键结论、关键数字、关键建议加[证据#N]。"
-        "仅当用户明确要求、证据不足或存在明显风险时，才提供“下一步建议”。"
+        "输出风格：简洁、精准、句句到位。\n"
+        "1. 结论先行：直接回答核心问题，结论加粗。\n"
+        "2. 分点作答：用加粗列表项（- **要点**：说明）聚焦核心信息。\n"
+        "3. 只给关键结论加 [证据#N]，不要每句都加。\n"
+        "4. 不要使用任何 emoji 或表情符号。\n"
+        "5. 不要讨论临界/边缘的正常指标，正常的一句话带过。\n"
+        "6. 仅当确有必要时才列'下一步建议'，且不超过3-5条。"
     )
 
 
@@ -2184,6 +2195,36 @@ def _normalize_answer_citations(answer: str, ranked_sources: list[dict[str, Any]
     text = re.sub(
         r"\[(?:literature|paper|文献)\s*#\s*(\d+)\]",
         lambda m: f"[文献#{m.group(1)}]",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # --- Pre-expand compound evidence citations ---
+    # e.g. [evidence#2, #25-27] -> [证据#2][证据#25][证据#26][证据#27]
+    # e.g. [evidence#4, #5, #8, #11等] -> [证据#4][证据#5][证据#8][证据#11]
+    def _expand_compound_evidence(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        parts = re.split(r"[,，]", inner)
+        nums: list[int] = []
+        for part in parts:
+            cleaned = part.replace("#", "").strip()
+            range_m = re.match(r"^(\d+)\s*[-–]\s*(\d+)$", cleaned)
+            if range_m:
+                start, end = int(range_m.group(1)), int(range_m.group(2))
+                for i in range(start, min(end + 1, start + 20)):
+                    nums.append(i)
+            else:
+                try:
+                    nums.append(int(cleaned))
+                except ValueError:
+                    pass
+        if not nums:
+            return match.group(0)
+        return "".join(f"[证据#{n}]" for n in nums)
+
+    text = re.sub(
+        r"\[(?:evidence|证据)\s*#\s*(\d+(?:\s*[-–]\s*\d+)?(?:\s*[,，]\s*#?\s*\d+(?:\s*[-–]\s*\d+)?)*)(?:\s*等)?\]",
+        _expand_compound_evidence,
         text,
         flags=re.IGNORECASE,
     )
@@ -3300,11 +3341,9 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                     {
                         "role": "system",
                         "content": (
-                            "你是一位经验丰富的结直肠外科高年资临床医生。"
                             "当前未检索到直接证据片段，但你拥有患者的对话历史和/或病程时间线。"
-                            "请基于这些已有信息回答用户的问题。"
-                            "回答时请以第一人称，像主治医生和患者家属交流一样，语气温和、专业。"
-                            "如果用户要求通俗解释，请用患者/家属能理解的语言重新表述已有信息。"
+                            "请基于这些已有信息直接回答用户的问题，问什么答什么。"
+                            "如果用户要求通俗解释，请用容易理解的语言重新表述已有信息。"
                             "不要编造不存在的检查结果或数据；如果信息不足以回答某个方面，请坦诚说明。"
                         ),
                     },
@@ -3360,23 +3399,26 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                     {
                         "role": "system",
                         "content": (
-                            "你是一位经验丰富的结直肠外科高年资临床医生。"
-                            "用户希望你对他们上传的所有报告和检查结果进行综合解读。"
-                            "请以第一人称，像主治医生与患者家属面对面交流一样自然回答。"
-                            "语气温和但专业，既要让非专业人士能理解，也要保持临床准确性。"
+                            "你是一位资深临床医生，正在为患者综合解读全部检查报告。"
+                            "核心原则：简洁、精准、只讲有临床意义的发现，句句到位。\n\n"
+                            "必须遵守的输出规则：\n"
+                            "1. 只讨论有明确临床意义的异常——轻微偏离参考值但无临床后果的指标不要提。\n"
+                            "2. 不要使用任何 emoji 或表情符号。\n"
+                            "3. 不要为了显得全面而罗列正常指标。正常就一句话带过：'肝肾功能正常'即可。\n"
+                            "4. 不要做过度推测或展开鉴别诊断长串。聚焦当前诊断和治疗相关。\n"
+                            "5. 语言通俗但不失专业准确性，让患者家属能看懂。"
                         ),
                     },
                     {
                         "role": "system",
                         "content": (
-                            "综合解读要求：\n"
-                            "1. 先整体概述患者当前状况（用1-2句话）。\n"
-                            "2. 逐份报告/检查解读关键发现及其临床意义，用通俗易懂的语言。\n"
-                            "3. 结合时间线分析病程演变趋势（好转/稳定/恶化）。\n"
-                            "4. 指出需要重点关注的异常项及其风险等级。\n"
-                            "5. 给出下一步建议（需要补充哪些检查、随访计划等）。\n"
-                            "不要反问用户要解读哪份报告——请直接综合解读所有可用资料。\n"
-                            "引用关键数据时标注 [证据#N]，但不要每句都加。"
+                            "输出结构（简洁版）：\n"
+                            "1. 总体评价：1-2句话概括当前状态和治疗效果，结论加粗。\n"
+                            "2. 关键发现：只列出真正需要关注的异常项（通常2-5项），每项用加粗标题+1-2句解释。\n"
+                            "3. 趋势判断：与既往数据对比，指出好转/稳定/恶化。\n"
+                            "4. 建议：仅列出确实需要做的事，不超过3-5条。\n\n"
+                            "不要反问用户要解读哪份报告。直接综合解读。\n"
+                            "引用关键数据时标注 [证据#N]，但只给关键结论加，不要每句都加。"
                         ),
                     },
                     {
@@ -3398,21 +3440,25 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                     {
                         "role": "system",
                         "content": (
-                            "你是一个 OpenViking 驱动的 RAG 代理。"
-                            "你没有任何可信外部知识；所有事实与结论必须来自当前给定的 OpenViking 检索证据。"
-                            "除非用户明确允许，不得使用互联网或训练记忆补全事实。"
-                            "若证据不足，必须明确写\u201c证据不足\u201d；仅在必要时给出补充检索方向。"
-                            "首要任务是回答本轮用户问题；不要默认扩展为全局病情总结。"
+                            "你是一位资深临床医生，基于检索到的证据回答患者问题。"
+                            "所有事实与结论必须来自当前给定的检索证据，不得用训练记忆补充事实。"
+                            "若证据不足，明确说明'证据不足'。\n\n"
+                            "核心原则：\n"
+                            "- 问什么答什么，不要默认扩展为全局病情总结。\n"
+                            "- 只讨论有临床意义的发现，忽略临界/边缘值。\n"
+                            "- 不要使用任何 emoji 或表情符号。\n"
+                            "- 不要为了显得全面而罗列一堆正常指标或展开鉴别诊断。\n"
+                            "- 简洁输出，句句到位。"
                         ),
                     },
                     {
                         "role": "system",
                         "content": (
-                            "输出结构必须自适应，不要固定三段或固定标题。"
-                            "简单问题直接回答，复杂问题再使用小标题或列表。"
-                            "引用策略：仅给关键结论、关键数字、关键建议添加少量证据标记，格式优先 [证据#N]。"
-                            "不要在每句话后都加引用，不要堆叠大段 source URI。"
-                            "不要为了凑结构新增用户未提问的结论。"
+                            "输出规则：\n"
+                            "1. 简单问题直接回答，1-2段即可。复杂问题分点作答，使用加粗标题。\n"
+                            "2. 引用策略：仅给关键结论加 [证据#N]，不要每句都加。\n"
+                            "3. 不要为了凑结构新增用户未提问的内容。\n"
+                            "4. 正常指标一笔带过，不要逐项罗列。"
                         ),
                     },
                     {"role": "system", "content": style_hint},
