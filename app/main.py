@@ -573,6 +573,22 @@ def _original_file_path_for_source(
     return None
 
 
+def _masked_upload_source_name(source: str) -> str:
+    normalized = _normalize_upload_source(source)
+    stem, _dot, _suffix = normalized.rpartition(".")
+    return f"{stem or normalized}.masked.jpg"
+
+
+def _decode_masked_data_url(data_url: str) -> bytes | None:
+    raw = str(data_url or "").strip()
+    if not raw:
+        return None
+    try:
+        return base64.b64decode(raw.split(",", 1)[-1])
+    except Exception:
+        return None
+
+
 def _save_upload_original(
     source: str,
     file_bytes: bytes,
@@ -1592,24 +1608,97 @@ def _build_image_redaction_result(file_bytes: bytes, mime_type: str) -> dict[str
     image = Image.open(io.BytesIO(file_bytes))
     width, height = image.size
     boxes: list[dict[str, Any]] = []
+    seen_boxes: set[tuple[int, int, int, int]] = set()
+
+    def _append_box(word: dict[str, Any], hit_types: list[str]) -> None:
+        key = (
+            int(word.get("x1", 0)),
+            int(word.get("y1", 0)),
+            int(word.get("x2", 0)),
+            int(word.get("y2", 0)),
+        )
+        if key in seen_boxes:
+            return
+        seen_boxes.add(key)
+        boxes.append(
+            {
+                "text": str(word.get("text", ""))[:80],
+                "types": hit_types,
+                "x1": key[0],
+                "y1": key[1],
+                "x2": key[2],
+                "y2": key[3],
+                "image_width": int(width),
+                "image_height": int(height),
+            }
+        )
+
+    normalized_words: list[dict[str, Any]] = []
     for word in words:
         text = str(word.get("text", "")).strip()
         if not text:
             continue
-        hit_types = detect_sensitive_types(text)
-        if not hit_types:
-            continue
-        box = {
-            "text": text[:80],
-            "types": hit_types,
+        current = {
+            "text": text,
             "x1": int(word.get("x1", 0)),
             "y1": int(word.get("y1", 0)),
             "x2": int(word.get("x2", 0)),
             "y2": int(word.get("y2", 0)),
-            "image_width": int(width),
-            "image_height": int(height),
         }
-        boxes.append(box)
+        normalized_words.append(current)
+        hit_types = detect_sensitive_types(text)
+        if not hit_types:
+            continue
+        _append_box(current, hit_types)
+
+    def _group_words_into_lines(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        sorted_items = sorted(items, key=lambda item: (item["y1"], item["x1"]))
+        lines: list[list[dict[str, Any]]] = []
+        centers: list[float] = []
+        for item in sorted_items:
+            cy = (item["y1"] + item["y2"]) / 2
+            h = max(1, item["y2"] - item["y1"])
+            tolerance = max(14.0, min(28.0, h * 0.9))
+            if lines and abs(cy - centers[-1]) <= tolerance:
+                lines[-1].append(item)
+                centers[-1] = sum((w["y1"] + w["y2"]) / 2 for w in lines[-1]) / len(lines[-1])
+            else:
+                lines.append([item])
+                centers.append(cy)
+        for line in lines:
+            line.sort(key=lambda item: item["x1"])
+        return lines
+
+    def _is_demographic_marker(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        return bool(
+            compact in {"男", "女"}
+            or re.fullmatch(r"\d{1,3}岁", compact)
+            or re.fullmatch(r"\d{1,3}床", compact)
+        )
+
+    def _looks_like_standalone_name(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        return bool(re.fullmatch(r"[\u4e00-\u9fa5·]{2,4}", compact))
+
+    def _looks_like_sensitive_identifier(text: str) -> bool:
+        compact = re.sub(r"[\s-]+", "", text)
+        return bool(
+            re.fullmatch(r"\d{8,}", compact)
+            or re.fullmatch(r"[A-Za-z]{0,3}\d{6,}[A-Za-z0-9]*", compact)
+        )
+
+    for line in _group_words_into_lines(normalized_words):
+        markers = [item for item in line if _is_demographic_marker(item["text"])]
+        if not markers:
+            continue
+        first_marker_x = min(item["x1"] for item in markers)
+        for item in line:
+            if _looks_like_standalone_name(item["text"]) and item["x1"] < first_marker_x:
+                _append_box(item, ["name_field"])
+                continue
+            if _looks_like_sensitive_identifier(item["text"]):
+                _append_box(item, ["medical_record"])
     if not boxes:
         return {
             "available": False,
@@ -2615,12 +2704,14 @@ def user_delete_upload(request: Request, source: str = "") -> JSONResponse:
     layered_store = _get_or_create_user_openviking_store(user_id)
     removed_layers = layered_store.remove_source(full_source)
     removed_original = _delete_upload_original(full_source, user_id=user_id)
+    removed_masked_original = _delete_upload_original(_masked_upload_source_name(full_source), user_id=user_id)
     return JSONResponse({
         "ok": True,
         "removed_chunks": removed_chunks,
         "removed_events": removed_events,
         "removed_openviking_layers": removed_layers,
         "removed_original_file": removed_original,
+        "removed_masked_original_file": removed_masked_original,
         "remaining_chunks": len(store.chunks),
         "remaining_events": len(events),
         "remaining_openviking_layers": layered_store.stats().get("total", 0),
@@ -2694,6 +2785,25 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
             if is_image and ENABLE_UPLOAD_DEID:
                 image_redaction = _build_image_redaction_result(file_bytes, mime_type=input_mime)
             stage_ms["image_redaction_ms"] = round(_ms(stage_t0), 2)
+            # Save masked version of image alongside original for source preview
+            if (
+                is_image
+                and SAVE_UPLOAD_ORIGINALS
+                and image_redaction.get("available")
+                and image_redaction.get("masked_data_url")
+            ):
+                try:
+                    _masked_bytes = _decode_masked_data_url(image_redaction.get("masked_data_url", ""))
+                    if not _masked_bytes:
+                        raise ValueError("masked_data_url decode failed")
+                    _save_upload_original(
+                        _masked_upload_source_name(source_key),
+                        _masked_bytes,
+                        user_id=auth_user_id,
+                        session_id=None if auth_user_id else session_id,
+                    )
+                except Exception:
+                    pass  # best-effort; do not block upload on masking save failure
             stage_t0 = time.perf_counter()
             chunks = split_text(text)
             stage_ms["split_ms"] = round(_ms(stage_t0), 2)
@@ -3005,14 +3115,51 @@ def source_original(request: Request, source: str = "") -> Response:
         )
 
     media_type = _guess_file_media_type(file_path, source_hint=source_key)
+    served_redacted = False
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Source-Key": _safe_header_value(source_key),
+        "X-Source-Redacted": "0",
+    }
+    # For image files, prefer the masked (redacted) version if available
+    if media_type.startswith("image/"):
+        masked_path, _ = _resolve_original_file_for_source(
+            _masked_upload_source_name(source_key),
+            user_id=auth_user_id,
+            session_id=None if auth_user_id else session_id,
+        )
+        if masked_path is not None:
+            file_path = masked_path
+            media_type = "image/jpeg"
+            served_redacted = True
+        elif ENABLE_UPLOAD_DEID:
+            try:
+                image_redaction = _build_image_redaction_result(file_path.read_bytes(), mime_type=media_type)
+            except Exception:
+                image_redaction = {"available": False}
+            masked_bytes = _decode_masked_data_url(image_redaction.get("masked_data_url", ""))
+            if image_redaction.get("available") and masked_bytes:
+                served_redacted = True
+                media_type = "image/jpeg"
+                headers["X-Source-Redacted"] = "1"
+                # Backfill masked original so existing uploads also become safe in preview.
+                if SAVE_UPLOAD_ORIGINALS:
+                    try:
+                        _save_upload_original(
+                            _masked_upload_source_name(source_key),
+                            masked_bytes,
+                            user_id=auth_user_id,
+                            session_id=None if auth_user_id else session_id,
+                        )
+                    except Exception:
+                        pass
+                return Response(content=masked_bytes, media_type=media_type, headers=headers)
+    headers["X-Source-Redacted"] = "1" if served_redacted else "0"
     return FileResponse(
         file_path,
         media_type=media_type,
         filename=file_path.name,
-        headers={
-            "Cache-Control": "no-store",
-            "X-Source-Key": _safe_header_value(source_key),
-        },
+        headers=headers,
     )
 
 

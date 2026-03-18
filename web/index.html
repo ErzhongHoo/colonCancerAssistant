@@ -166,12 +166,28 @@
     }
 
     .source-frame-wrap {
+      position: relative;
       flex: 1;
       min-height: 0;
       display: flex;
       align-items: stretch;
       justify-content: stretch;
       background: #fff;
+    }
+
+    .source-redact-badge {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: rgba(0, 0, 0, 0.72);
+      color: #4ade80;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      pointer-events: none;
+      z-index: 2;
+      letter-spacing: 0.3px;
     }
 
     .source-frame {
@@ -3747,6 +3763,7 @@
     let sourcePreviewBlobUrl = "";
     let sourcePreviewKey = "";
     let sourcePreviewMime = "";
+    let sourcePreviewRedacted = false;
 
     const CHAT_PROGRESS_STEPS = [
       { key: "accepted", label: "已接收" },
@@ -3901,6 +3918,7 @@
       }
       sourcePreviewKey = "";
       sourcePreviewMime = "";
+      sourcePreviewRedacted = false;
     }
 
     function renderSourcePlaceholder(text) {
@@ -3934,38 +3952,36 @@
         loading.textContent = "正在加载原始文件...";
         sourcePaneBody.appendChild(loading);
 
-        let blobUrl = sourcePreviewBlobUrl;
-        let mimeType = sourcePreviewMime;
-        if (sourcePreviewKey !== source || !blobUrl) {
-          cleanupSourcePreviewBlob();
-          const res = await fetch(`/api/source/original?source=${encodeURIComponent(source)}`, {
-            headers: authHeaders(),
-            cache: "no-store",
-          });
-          if (!res.ok) {
-            let errText = `无法打开来源文件（HTTP ${res.status}）`;
-            try {
-              const data = await res.json();
-              if (data?.error === "original_not_found") {
-                errText = data?.save_upload_originals
-                  ? "来源文件不存在或已被清理。"
-                  : "未保存原始文件，无法渲染原件。请开启 SAVE_UPLOAD_ORIGINALS 后重新上传。";
-              } else if (data?.error) {
-                errText = `无法打开来源文件：${data.error}`;
-              }
-            } catch (_err) {
-              // Ignore JSON parse errors and keep default message.
+        cleanupSourcePreviewBlob();
+        const res = await fetch(`/api/source/original?source=${encodeURIComponent(source)}`, {
+          headers: authHeaders(),
+          cache: "no-store",
+        });
+        if (!res.ok) {
+          let errText = `无法打开来源文件（HTTP ${res.status}）`;
+          try {
+            const data = await res.json();
+            if (data?.error === "original_not_found") {
+              errText = data?.save_upload_originals
+                ? "来源文件不存在或已被清理。"
+                : "未保存原始文件，无法渲染原件。请开启 SAVE_UPLOAD_ORIGINALS 后重新上传。";
+            } else if (data?.error) {
+              errText = `无法打开来源文件：${data.error}`;
             }
-            renderSourcePlaceholder(errText);
-            return;
+          } catch (_err) {
+            // Ignore JSON parse errors and keep default message.
           }
-          const blob = await res.blob();
-          mimeType = String(blob.type || "");
-          blobUrl = URL.createObjectURL(blob);
-          sourcePreviewBlobUrl = blobUrl;
-          sourcePreviewKey = source;
-          sourcePreviewMime = mimeType;
+          renderSourcePlaceholder(errText);
+          return;
         }
+        const blob = await res.blob();
+        const mimeType = String(blob.type || "");
+        const isRedacted = res.headers.get("X-Source-Redacted") === "1";
+        const blobUrl = URL.createObjectURL(blob);
+        sourcePreviewBlobUrl = blobUrl;
+        sourcePreviewKey = source;
+        sourcePreviewMime = mimeType;
+        sourcePreviewRedacted = isRedacted;
 
         const kind = sourceKindFromName(source, mimeType);
         sourcePaneBody.innerHTML = "";
@@ -3978,6 +3994,12 @@
           img.alt = source;
           img.src = blobUrl;
           wrap.appendChild(img);
+          if (isRedacted) {
+            const badge = document.createElement("div");
+            badge.className = "source-redact-badge";
+            badge.textContent = "🛡️ 已脱敏";
+            wrap.appendChild(badge);
+          }
         } else if (kind === "pdf") {
           const frame = document.createElement("iframe");
           frame.className = "source-frame";
