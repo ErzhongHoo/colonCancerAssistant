@@ -1830,7 +1830,46 @@ def _wants_deep_answer(query: str) -> bool:
     return any(t in q for t in ("深入", "详细", "全面", "原理", "比较", "why", "how"))
 
 
-def _build_response_style_hint(query: str, reasoning_mode: str, history: list[dict[str, str]] | None = None) -> str:
+# ---------------------------------------------------------------------------
+# Response style definitions (回答风格)
+# ---------------------------------------------------------------------------
+RESPONSE_STYLE_PROMPTS: dict[str, str] = {
+    "professional": (
+        "语气风格：专业严谨。使用标准临床术语，逻辑清晰，表述精确。"
+        "结论先行，关键数据引用准确。保持学术级别的严谨性和客观性。"
+    ),
+    "friendly": (
+        "语气风格：温暖亲切。像一位关心患者的家庭医生，用通俗易懂的语言解释。"
+        "语气柔和、有温度，适当使用比喻帮助理解。让患者感到被关心和安心。"
+    ),
+    "candid": (
+        "语气风格：坦诚直接。不回避问题，直截了当地给出核心信息。"
+        "适度鼓励，但绝不粉饰太平。用真诚的态度告知风险和希望。"
+    ),
+    "vivid": (
+        "语气风格：生动形象。使用通俗的比喻和类比来解释复杂的医学概念。"
+        "让专业内容变得有趣易懂，像一场生动的科普讲解。"
+    ),
+    "concise": (
+        "语气风格：极简高效。用最少的话传达最核心的信息。"
+        "每句话都有信息量，不废话，不铺垫。结论、数据、建议，直击要害。"
+    ),
+    "critical": (
+        "语气风格：严格审视。以批判性思维分析每个问题，指出潜在的风险和不足。"
+        "不轻易下乐观结论，认真对待每个异常数据。帮助患者全面认识病情。"
+    ),
+}
+
+
+def _build_response_style_hint(
+    query: str,
+    reasoning_mode: str,
+    history: list[dict[str, str]] | None = None,
+    response_style: str = "default",
+) -> str:
+    chosen_style = str(response_style or "default").strip().lower()
+    style_suffix = RESPONSE_STYLE_PROMPTS.get(chosen_style, "")
+
     q = str(query or "").strip().lower()
     multi_part_terms = ("以及", "并且", "分别", "对比", "差异", "优缺点", "方案", "风险", "依据")
     asks_structure = any(t in q for t in multi_part_terms)
@@ -1843,22 +1882,26 @@ def _build_response_style_hint(query: str, reasoning_mode: str, history: list[di
         or has_multi_turn
     )
     if not needs_structured:
-        return (
+        base = (
             "输出风格：直接自然回答，控制在1-2段内。"
             "不要加固定标题，不要硬分结论/依据/下一步。"
             "不要使用任何 emoji。不要讨论临界/边缘值。"
             "若需给出证据，仅为关键结论添加少量[证据#N]。"
             "正常指标不要逐项列出。"
         )
-    return (
-        "输出风格：简洁、精准、句句到位。\n"
-        "1. 结论先行：直接回答核心问题，结论加粗。\n"
-        "2. 分点作答：用加粗列表项（- **要点**：说明）聚焦核心信息。\n"
-        "3. 只给关键结论加 [证据#N]，不要每句都加。\n"
-        "4. 不要使用任何 emoji 或表情符号。\n"
-        "5. 不要讨论临界/边缘的正常指标，正常的一句话带过。\n"
-        "6. 仅当确有必要时才列'下一步建议'，且不超过3-5条。"
-    )
+    else:
+        base = (
+            "输出风格：简洁、精准、句句到位。\n"
+            "1. 结论先行：直接回答核心问题，结论加粗。\n"
+            "2. 分点作答：用加粗列表项（- **要点**：说明）聚焦核心信息。\n"
+            "3. 只给关键结论加 [证据#N]，不要每句都加。\n"
+            "4. 不要使用任何 emoji 或表情符号。\n"
+            "5. 不要讨论临界/边缘的正常指标，正常的一句话带过。\n"
+            "6. 仅当确有必要时才列'下一步建议'，且不超过3-5条。"
+        )
+    if style_suffix:
+        return f"{base}\n{style_suffix}"
+    return base
 
 
 def _extract_retrieval_keywords(query: str, max_terms: int = 5) -> list[str]:
@@ -2292,6 +2335,7 @@ def _build_openviking_evidence_guard(answer: str, evidence: list[dict[str, Any]]
 class ChatRequest(BaseModel):
     message: str
     history: list[dict[str, str]] = []
+    response_style: str = "default"
 
 
 class ImportGuidelinesRequest(BaseModel):
@@ -3310,7 +3354,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
 
         next_keywords = _extract_retrieval_keywords(payload.message, max_terms=5)
         citation_warning = ""
-        style_hint = _build_response_style_hint(payload.message, reasoning_mode, payload.history)
+        style_hint = _build_response_style_hint(payload.message, reasoning_mode, payload.history, response_style=payload.response_style)
 
         if not evidence_items:
             # ── Determine if we can fall back to history/timeline context ──
@@ -3433,6 +3477,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                         ),
                     },
                     {"role": "system", "content": f"以下是用户上传的所有报告/检查证据（共{len(evidence_items)}条，编号为 evidence#1 至 evidence#{len(evidence_items)}），请综合解读。引用时只能使用这些编号，不要使用超出范围的编号：\n{context}"},
+                    {"role": "system", "content": style_hint},
                 ]
             else:
                 # -- Standard RAG prompt --

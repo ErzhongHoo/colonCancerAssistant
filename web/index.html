@@ -381,11 +381,11 @@
       width: fit-content;
       max-width: 80%;
       margin-left: auto;
-      background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%);
+      background: linear-gradient(135deg, #e8f0fe 0%, #d2e3fc 100%);
       padding: 14px 20px;
       border-radius: 20px 20px 4px 20px;
-      border: 1px solid rgba(99, 102, 241, 0.1);
-      box-shadow: 0 2px 8px rgba(99, 102, 241, 0.06);
+      border: 1px solid rgba(26, 115, 232, 0.1);
+      box-shadow: 0 2px 8px rgba(26, 115, 232, 0.06);
     }
 
     .msg.assistant {
@@ -451,7 +451,7 @@
       bottom: 3px;
       width: 3px;
       border-radius: 3px;
-      background: #6366f1;
+      background: #1a73e8;
     }
 
     .msg.assistant h4 {
@@ -502,7 +502,7 @@
       width: 6px;
       height: 6px;
       border-radius: 50%;
-      background: #6366f1;
+      background: #1a73e8;
     }
 
     .msg.assistant ol>li {
@@ -512,7 +512,7 @@
     }
 
     .msg.assistant ol>li::marker {
-      color: #6366f1;
+      color: #1a73e8;
       font-weight: 700;
       font-size: 0.95em;
     }
@@ -581,7 +581,7 @@
 
     /* ── Blockquotes — Clean accent bar ── */
     .msg.assistant blockquote {
-      border-left: 3px solid #6366f1;
+      border-left: 3px solid #1a73e8;
       background: #f9fafb;
       margin: 20px 0;
       padding: 14px 20px;
@@ -711,14 +711,14 @@
     }
 
     .quick-action-chip.chip-primary {
-      background: linear-gradient(135deg, #e8f0fe, #f0e6ff);
+      background: linear-gradient(135deg, #e8f0fe, #d2e3fc);
       border-color: #c4d7f5;
       color: var(--primary);
       font-weight: 600;
     }
 
     .quick-action-chip.chip-primary:hover {
-      background: linear-gradient(135deg, var(--primary), #7c3aed);
+      background: linear-gradient(135deg, var(--primary), #1a73e8);
       color: #fff;
       border-color: var(--primary);
     }
@@ -756,9 +756,9 @@
     }
 
     .composer-upload-btn:hover {
-      border-color: #6366f1;
-      color: #6366f1;
-      background: #eef2ff;
+      border-color: #1a73e8;
+      color: #1a73e8;
+      background: #e8f0fe;
       transform: scale(1.05);
     }
 
@@ -773,7 +773,7 @@
       width: 18px;
       height: 18px;
       border-radius: 50%;
-      background: #6366f1;
+      background: #1a73e8;
       color: #fff;
       font-size: 10px;
       font-weight: 700;
@@ -872,7 +872,7 @@
       appearance: none;
       border: 1px dashed #d1d5db;
       background: #f9fafb;
-      color: #6366f1;
+      color: #1a73e8;
       font-size: 12px;
       font-weight: 600;
       padding: 6px 14px;
@@ -882,8 +882,8 @@
     }
 
     .upload-panel-add-btn:hover {
-      border-color: #6366f1;
-      background: #eef2ff;
+      border-color: #1a73e8;
+      background: #e8f0fe;
     }
 
 
@@ -921,6 +921,126 @@
     #message:focus {
       background: #e9eef6;
       box-shadow: none;
+    }
+
+    /* ── Response Style Selector ── */
+    .style-selector {
+      position: relative;
+    }
+
+    .style-selector-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 8px 14px;
+      border: 1.5px solid #e5e7eb;
+      border-radius: 999px;
+      background: #f9fafb;
+      color: #374151;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+      font-family: var(--font-main);
+      line-height: 1;
+    }
+
+    .style-selector-btn:hover {
+      border-color: #1a73e8;
+      color: #1a73e8;
+      background: #e8f0fe;
+    }
+
+    .style-selector-btn .style-arrow {
+      font-size: 10px;
+      transition: transform 0.2s ease;
+      color: #9ca3af;
+    }
+
+    .style-selector.open .style-selector-btn .style-arrow {
+      transform: rotate(180deg);
+    }
+
+    .style-dropdown {
+      display: none;
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 50%;
+      transform: translateX(-50%);
+      min-width: 210px;
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.03);
+      padding: 6px;
+      z-index: 30;
+      animation: styleDropUp 0.18s ease-out;
+    }
+
+    .style-selector.open .style-dropdown {
+      display: block;
+    }
+
+    @keyframes styleDropUp {
+      from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(6px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+    }
+
+    .style-option {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.15s;
+      border: none;
+      background: none;
+      width: 100%;
+      text-align: left;
+      font-family: var(--font-main);
+    }
+
+    .style-option:hover {
+      background: #f3f4f6;
+    }
+
+    .style-option-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .style-option-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .style-option-desc {
+      font-size: 12px;
+      color: #9ca3af;
+      font-weight: 400;
+    }
+
+    .style-option-check {
+      font-size: 14px;
+      color: #1a73e8;
+      font-weight: 700;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+
+    .style-option.active .style-option-check {
+      opacity: 1;
     }
 
     #send-btn {
@@ -1176,16 +1296,16 @@
       display: none;
       flex-direction: column;
       gap: 8px;
-      background: linear-gradient(135deg, #eff6ff 0%, #f5f3ff 50%, #fdf4ff 100%);
+      background: linear-gradient(135deg, #eff6ff 0%, #e8f0fe 50%, #d2e3fc 100%);
       border-radius: var(--radius-l);
       padding: 14px 18px;
       margin: 0 auto 16px auto;
       max-width: 800px;
       font-size: 13px;
       color: var(--text-secondary);
-      border: 1px solid rgba(99, 102, 241, 0.1);
+      border: 1px solid rgba(26, 115, 232, 0.1);
       animation: pulseSubtle 2s infinite;
-      box-shadow: 0 2px 8px rgba(99, 102, 241, 0.04);
+      box-shadow: 0 2px 8px rgba(26, 115, 232, 0.04);
     }
 
     .thinking-indicator.on {
@@ -1224,7 +1344,7 @@
     .thinking-progress-fill {
       height: 100%;
       width: 0%;
-      background: linear-gradient(90deg, #3b82f6, #8b5cf6, #ec4899);
+      background: linear-gradient(90deg, #3b82f6, #1a73e8, #1967d2);
       border-radius: 999px;
       transition: width 0.25s ease;
     }
@@ -1247,8 +1367,8 @@
     }
 
     .thinking-step-tag.active {
-      background: rgba(99, 102, 241, 0.1);
-      color: #6366f1;
+      background: rgba(26, 115, 232, 0.1);
+      color: #1a73e8;
       animation: pulseSubtle 1.5s infinite;
     }
 
@@ -1277,13 +1397,13 @@
       font-family: var(--font-cite);
       font-size: 0.6em;
       font-weight: 700;
-      color: #6366f1;
-      background: #eef2ff;
+      color: #1a73e8;
+      background: #e8f0fe;
       padding: 1px 5px;
       border-radius: 3px;
       text-decoration: none;
       cursor: pointer;
-      border: 1px solid #c7d2fe;
+      border: 1px solid #aecbfa;
       transition: all 0.15s ease;
       vertical-align: super;
       letter-spacing: 0.02em;
@@ -1293,16 +1413,16 @@
     }
 
     .cite-link:hover {
-      background: #e0e7ff;
-      border-color: #a5b4fc;
-      color: #4f46e5;
+      background: #d2e3fc;
+      border-color: #8ab4f8;
+      color: #1a73e8;
       text-decoration: none;
     }
 
     .cite-link.cite-evidence {
-      color: #6366f1;
-      background: #eef2ff;
-      border-color: #c7d2fe;
+      color: #1a73e8;
+      background: #e8f0fe;
+      border-color: #aecbfa;
     }
 
     .cite-link.cite-literature {
@@ -1442,7 +1562,7 @@
     }
 
     .evidence-item summary:hover {
-      background: linear-gradient(135deg, #eff6ff 0%, #eef2ff 100%);
+      background: linear-gradient(135deg, #eff6ff 0%, #e8f0fe 100%);
     }
 
     .evidence-item summary::-webkit-details-marker {
@@ -1527,7 +1647,7 @@
       font-weight: 600;
       letter-spacing: 0.02em;
       border: 1px solid transparent;
-      background: #eef2ff;
+      background: #e8f0fe;
       color: #334155;
       line-height: 1.2;
     }
@@ -1796,8 +1916,8 @@
     }
 
     .redact-tag-bank_card {
-      color: #6d28aa;
-      background: #f3edff;
+      color: #1a73e8;
+      background: #e8f0fe;
     }
 
     .redact-tag-name_field {
@@ -2931,6 +3051,63 @@
             <span>+</span>
             <span class="upload-badge" id="upload-file-badge"></span>
           </button>
+          <div class="style-selector" id="style-selector">
+            <button class="style-selector-btn" id="style-selector-btn" type="button" title="选择回答风格">
+              <span id="style-label">默认</span>
+              <span class="style-arrow">▾</span>
+            </button>
+            <div class="style-dropdown" id="style-dropdown">
+              <button class="style-option active" data-style="default" type="button">
+                <div class="style-option-info">
+                  <span class="style-option-name">默认</span>
+                  <span class="style-option-desc">自动选择风格和语气</span>
+                </div>
+                <span class="style-option-check">✓</span>
+              </button>
+              <button class="style-option" data-style="professional" type="button">
+                <div class="style-option-info">
+                  <span class="style-option-name">专业</span>
+                  <span class="style-option-desc">严谨精确，学术风格</span>
+                </div>
+                <span class="style-option-check">✓</span>
+              </button>
+              <button class="style-option" data-style="friendly" type="button">
+                <div class="style-option-info">
+                  <span class="style-option-name">友善</span>
+                  <span class="style-option-desc">温暖亲切，通俗易懂</span>
+                </div>
+                <span class="style-option-check">✓</span>
+              </button>
+              <button class="style-option" data-style="candid" type="button">
+                <div class="style-option-info">
+                  <span class="style-option-name">坦诚</span>
+                  <span class="style-option-desc">直截了当，不做粉饰</span>
+                </div>
+                <span class="style-option-check">✓</span>
+              </button>
+              <button class="style-option" data-style="vivid" type="button">
+                <div class="style-option-info">
+                  <span class="style-option-name">生动</span>
+                  <span class="style-option-desc">形象比喻，趣味科普</span>
+                </div>
+                <span class="style-option-check">✓</span>
+              </button>
+              <button class="style-option" data-style="concise" type="button">
+                <div class="style-option-info">
+                  <span class="style-option-name">简洁</span>
+                  <span class="style-option-desc">极简高效，直击要害</span>
+                </div>
+                <span class="style-option-check">✓</span>
+              </button>
+              <button class="style-option" data-style="critical" type="button">
+                <div class="style-option-info">
+                  <span class="style-option-name">犀利</span>
+                  <span class="style-option-desc">批判审视，严格分析</span>
+                </div>
+                <span class="style-option-check">✓</span>
+              </button>
+            </div>
+          </div>
           <input id="message" placeholder="输入问题，例如：目前风险和可选治疗路径如何？还缺哪些关键报告？" />
           <button id="send-btn">发送</button>
         </div>
@@ -3259,9 +3436,11 @@
           authToken = data.token;
           currentUser = data.user;
           localStorage.setItem('auth_token', authToken);
+          localStorage.removeItem(SESSIONS_STORAGE_KEY);
+          localStorage.removeItem(ACTIVE_SESSION_KEY);
           isGuest = false;
           authModal.classList.add('hidden');
-          onAuthReady();
+          location.reload();
         } else {
           authError.textContent = data.error || '\u64cd\u4f5c\u5931\u8d25';
           authError.style.display = 'block';
@@ -3365,6 +3544,8 @@
       authToken = null;
       currentUser = null;
       localStorage.removeItem('auth_token');
+      localStorage.removeItem(SESSIONS_STORAGE_KEY);
+      localStorage.removeItem(ACTIVE_SESSION_KEY);
       isGuest = true;
       location.reload();
     }
@@ -5068,7 +5249,7 @@
               "X-Chat-Request-Id": chatRequestId,
               ...authHeaders(),
             },
-            body: JSON.stringify({ message: text, history }),
+            body: JSON.stringify({ message: text, history, response_style: currentResponseStyle }),
           });
           let data = {};
           try {
@@ -5122,6 +5303,54 @@
       }
     }
 
+
+
+    // ── Response Style Selector Logic ──
+    const STYLE_LABELS = {
+      default: "默认", professional: "专业", friendly: "友善",
+      candid: "坦诚", vivid: "生动", concise: "简洁", critical: "犀利"
+    };
+    let currentResponseStyle = localStorage.getItem("response_style") || "default";
+
+    (function initStyleSelector() {
+      const selector = document.getElementById("style-selector");
+      const btn = document.getElementById("style-selector-btn");
+      const label = document.getElementById("style-label");
+      const dropdown = document.getElementById("style-dropdown");
+      const options = dropdown.querySelectorAll(".style-option");
+
+      // Set initial label and active state
+      label.textContent = STYLE_LABELS[currentResponseStyle] || "默认";
+      options.forEach(opt => {
+        opt.classList.toggle("active", opt.dataset.style === currentResponseStyle);
+      });
+
+      // Toggle dropdown
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        selector.classList.toggle("open");
+      });
+
+      // Handle option click
+      options.forEach(opt => {
+        opt.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const style = opt.dataset.style;
+          currentResponseStyle = style;
+          localStorage.setItem("response_style", style);
+          label.textContent = STYLE_LABELS[style] || "默认";
+          options.forEach(o => o.classList.toggle("active", o.dataset.style === style));
+          selector.classList.remove("open");
+        });
+      });
+
+      // Close dropdown on outside click
+      document.addEventListener("click", (e) => {
+        if (!selector.contains(e.target)) {
+          selector.classList.remove("open");
+        }
+      });
+    })();
 
 
     // ── Composer Upload Button / Panel Logic ──
