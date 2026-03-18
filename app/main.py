@@ -168,6 +168,10 @@ else:
     except Exception:
         CHAT_COMPLETION_TIMEOUT_SECONDS = 120.0
 CHAT_PROGRESS_TTL_SECONDS = max(int(os.getenv("CHAT_PROGRESS_TTL_SECONDS", "1800")), 60)
+INVITE_CODE = os.getenv("INVITE_CODE", "").strip()
+REQUIRE_LOGIN = os.getenv("REQUIRE_LOGIN", "false").strip().lower() in {"1", "true", "yes", "on"}
+if INVITE_CODE:
+    REQUIRE_LOGIN = True
 
 app = FastAPI(title="“肠”治久安")
 client = build_client()
@@ -871,6 +875,11 @@ def _first_diff_offset(left: str, right: str) -> int:
     if len(a) != len(b):
         return size
     return -1
+
+
+def check_require_login(auth_user_id: str | None) -> None:
+    if REQUIRE_LOGIN and not auth_user_id:
+        raise HTTPException(status_code=401, detail="当前系统未开放访客使用，请先登录或注册。")
 
 
 def _get_auth_user(request: Request):
@@ -2351,6 +2360,7 @@ class RegisterRequest(BaseModel):
     username: str
     password: str
     display_name: str = ""
+    invite_code: str = ""
 
 
 class LoginRequest(BaseModel):
@@ -2378,6 +2388,7 @@ def health() -> dict[str, Any]:
     _cleanup_expired_sessions()
     return {
         "status": "ok",
+        "require_login": REQUIRE_LOGIN,
         "literature_topic_query": LITERATURE_AGENT_TOPIC_QUERY,
         "vector_backend": get_vector_backend(),
         "upload_deid": ENABLE_UPLOAD_DEID,
@@ -2418,6 +2429,8 @@ def health() -> dict[str, Any]:
 
 @app.post("/api/auth/register")
 def auth_register(payload: RegisterRequest) -> JSONResponse:
+    if INVITE_CODE and payload.invite_code != INVITE_CODE:
+        return JSONResponse({"ok": False, "error": "邀请码错误或未提供"}, status_code=403)
     ok, result = user_manager.register(
         payload.username, payload.password, payload.display_name
     )
@@ -2623,6 +2636,7 @@ def bootstrap_literature_agent() -> None:
 @app.post("/api/upload")
 async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONResponse:
     _auth_user, auth_user_id = _get_auth_user(request)
+    check_require_login(auth_user_id)
     session_id = _get_session_id(request)
 
     # Use persistent user store if authenticated, otherwise in-memory session store
@@ -3220,6 +3234,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
     incoming_request_id = request.headers.get("x-chat-request-id", "").strip()
     chat_request_id = _normalize_session_id(incoming_request_id) or f"c-{uuid.uuid4().hex[:16]}"
     auth_user, auth_user_id = _get_auth_user(request)
+    check_require_login(auth_user_id)
     session_id = _get_session_id(request)
     progress_session_id = auth_user_id or session_id
     _chat_progress_begin(chat_request_id, progress_session_id)

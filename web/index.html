@@ -2882,6 +2882,10 @@
           <label for="auth-displayname">显示名称 <span style="color:var(--text-muted)">(可选)</span></label>
           <input type="text" id="auth-displayname" placeholder="你的名称" />
         </div>
+        <div id="auth-invitecode-row" style="display:none">
+          <label for="auth-invitecode">邀请码 <span style="color:var(--text-muted)">(必填)</span></label>
+          <input type="text" id="auth-invitecode" placeholder="请输入邀请码" />
+        </div>
         <button type="submit" class="auth-btn" id="auth-submit-btn">登录</button>
       </form>
       <div class="auth-switch" id="auth-switch">
@@ -3391,6 +3395,7 @@
     const authToggleLink = document.getElementById('auth-toggle-link');
 
     const authDisplayNameRow = document.getElementById('auth-displayname-row');
+    const authInviteCodeRow = document.getElementById('auth-invitecode-row');
     let authMode = 'login'; // 'login' | 'register'
 
     function setAuthMode(mode) {
@@ -3401,12 +3406,14 @@
         authSubmitBtn.textContent = '\u6ce8\u518c';
         document.getElementById('auth-switch').innerHTML = '\u5df2\u6709\u8d26\u6237\uff1f<a id="auth-toggle-link">\u767b\u5f55</a>';
         authDisplayNameRow.style.display = 'block';
+        if (authInviteCodeRow) authInviteCodeRow.style.display = 'block';
       } else {
         authTitle.textContent = '\u767b\u5f55';
         authSubtitle.textContent = '\u767b\u5f55\u540e\u6570\u636e\u5c06\u6301\u4e45\u4fdd\u5b58\uff0c\u65f6\u95f4\u7ebf\u66f4\u6709\u610f\u4e49';
         authSubmitBtn.textContent = '\u767b\u5f55';
         document.getElementById('auth-switch').innerHTML = '\u8fd8\u6ca1\u6709\u8d26\u6237\uff1f<a id="auth-toggle-link">\u6ce8\u518c</a>';
         authDisplayNameRow.style.display = 'none';
+        if (authInviteCodeRow) authInviteCodeRow.style.display = 'none';
       }
       document.getElementById('auth-toggle-link').onclick = () => setAuthMode(mode === 'login' ? 'register' : 'login');
       authError.style.display = 'none';
@@ -3418,13 +3425,14 @@
       const username = document.getElementById('auth-username').value.trim();
       const password = document.getElementById('auth-password').value;
       const displayName = document.getElementById('auth-displayname').value.trim();
+      const inviteCode = document.getElementById('auth-invitecode') ? document.getElementById('auth-invitecode').value.trim() : '';
       authError.style.display = 'none';
       authSubmitBtn.disabled = true;
       authSubmitBtn.textContent = '\u8bf7\u7a0d\u5019...';
       try {
         const url = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
         const body = authMode === 'register'
-          ? { username, password, display_name: displayName || username }
+          ? { username, password, display_name: displayName || username, invite_code: inviteCode }
           : { username, password };
         const resp = await fetch(url, {
           method: 'POST',
@@ -3459,14 +3467,30 @@
     };
     // Click outside modal-box to close
     authModal.addEventListener('click', (e) => {
-      if (e.target === authModal) {
+      if (e.target === authModal && document.getElementById('auth-close-btn').style.display !== 'none') {
         authModal.classList.add('hidden');
       }
     });
 
+    let isLoginRequired = false;
+    async function checkRequireLogin() {
+      try {
+        const res = await fetch('/api/health');
+        const h = await res.json();
+        if (h.require_login) {
+          isLoginRequired = true;
+          authModal.classList.remove('hidden');
+          setAuthMode('login');
+          // Hide close button so they must login
+          document.getElementById('auth-close-btn').style.display = 'none';
+        }
+      } catch (e) { }
+    }
+
     async function tryAutoLogin() {
       if (!authToken) {
         isGuest = true;
+        await checkRequireLogin();
         onAuthReady();
         return;
       }
@@ -3483,14 +3507,12 @@
           authToken = null;
           localStorage.removeItem('auth_token');
           isGuest = true;
+          await checkRequireLogin();
           onAuthReady();
         }
       } catch {
-        // On error, fallback to guest but keep token (maybe network issue) 
-        // or just treat as guest for this session without clearing token?
-        // Let's clear to be safe and avoid broken state, or just render guest.
-        // For simplicity:
         isGuest = true;
+        await checkRequireLogin();
         onAuthReady();
       }
     }
