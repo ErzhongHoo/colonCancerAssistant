@@ -169,7 +169,7 @@ else:
         CHAT_COMPLETION_TIMEOUT_SECONDS = 120.0
 CHAT_PROGRESS_TTL_SECONDS = max(int(os.getenv("CHAT_PROGRESS_TTL_SECONDS", "1800")), 60)
 
-app = FastAPI(title="Colon Cancer RAG MVP")
+app = FastAPI(title="“肠”治久安")
 client = build_client()
 internal_openviking_store = OpenVikingStore(INTERNAL_OPENVIKING_DB, namespace="internal-guidelines")
 audit_logger = AuditLogger(AUDIT_LOG_PATH)
