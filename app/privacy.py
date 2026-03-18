@@ -104,27 +104,66 @@ def redact_sensitive_info(text: str) -> tuple[str, RedactionStats]:
     stats = RedactionStats()
 
     # Chinese mainland ID card number.
-    # Use a callback to validate each candidate via checksum before redacting,
-    # avoiding false positives on medical codes (ultrasound numbers, etc.).
+    # Two-pass approach:
+    # 1. Context-aware: if "身份证" keyword appears nearby, treat matching
+    #    18-digit numbers as ID cards even if the checksum is invalid (OCR
+    #    commonly introduces checksum errors in scanned documents).
+    # 2. Standalone: validate via MOD-11 checksum to avoid false positives
+    #    on medical codes, ultrasound numbers, etc.
     _ID_CARD_PAT = re.compile(
         r"(?<![A-Za-z\d])"          # not preceded by letter or digit
         r"(\d{6}\s*\d{8}\s*[\dXx]{4})"
         r"(?!\d)"                    # not followed by digit
     )
+    # Context pattern: "身份证" keyword within 12 chars before the number.
+    _ID_CARD_CONTEXT_PAT = re.compile(
+        r"身份证[号码]*\s*[:：]?\s*"
+        r"(?P<num>\d{6}\s*\d{8}\s*[\dXx]{4})"
+        r"(?!\d)"
+    )
 
+    def _looks_like_id_card(digits: str) -> bool:
+        """Structural check (province + date) without checksum."""
+        clean = re.sub(r"\s", "", digits)
+        if len(clean) != 18:
+            return False
+        province = int(clean[:2])
+        _VALID_PROVINCES = {
+            11, 12, 13, 14, 15, 21, 22, 23,
+            31, 32, 33, 34, 35, 36, 37,
+            41, 42, 43, 44, 45, 46,
+            50, 51, 52, 53, 54,
+            61, 62, 63, 64, 65,
+            71, 81, 82,
+        }
+        if province not in _VALID_PROVINCES:
+            return False
+        try:
+            year, month, day = int(clean[6:10]), int(clean[10:12]), int(clean[12:14])
+        except ValueError:
+            return False
+        return 1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31
+
+    # Pass 1: context-aware replacement (keyword nearby → always redact).
+    content, _ctx_count = _replace_match_with_count(
+        _ID_CARD_CONTEXT_PAT,
+        content,
+        lambda m: m.group(0)[: m.start("num") - m.start()] + "<ID_CARD>",
+    )
+
+    # Pass 2: standalone checksum-validated replacement.
     def _id_card_sub(match: re.Match[str]) -> str:
         candidate = match.group(1)
         if _is_valid_id_card(candidate):
             return "<ID_CARD>"
         return match.group(0)  # leave unchanged
 
-    content, stats.id_card = _replace_match_with_count(
+    content, _standalone_count = _replace_match_with_count(
         _ID_CARD_PAT,
         content,
         _id_card_sub,
     )
-    # The count above includes *all* regex hits; recalculate to count only
-    # those that were actually replaced.
+    # Count only those that were actually replaced across both passes.
     stats.id_card = content.count("<ID_CARD>") - text.count("<ID_CARD>")
 
     # Mainland phone number.
@@ -138,12 +177,22 @@ def redact_sensitive_info(text: str) -> tuple[str, RedactionStats]:
         content,
         "<EMAIL>",
     )
-    # Common bank card range — also skip numbers preceded by letters.
-    content, stats.bank_card = _replace_with_count(
+    # Common bank card range — skip numbers that structurally look like
+    # ID cards (valid province prefix + plausible date) even if their
+    # checksum didn't pass, so they aren't misclassified as bank cards.
+    def _bank_card_sub(match: re.Match[str]) -> str:
+        candidate = re.sub(r"\s", "", match.group(1))
+        if len(candidate) == 18 and _looks_like_id_card(candidate):
+            return match.group(0)  # skip — likely an ID card with bad checksum
+        return "<BANK_CARD>"
+
+    _pre_bank = content.count("<BANK_CARD>")
+    content, _bank_raw = _replace_match_with_count(
         re.compile(r"(?<![A-Za-z\d])(\d{16,19})(?!\d)"),
         content,
-        "<BANK_CARD>",
+        _bank_card_sub,
     )
+    stats.bank_card = content.count("<BANK_CARD>") - _pre_bank
     # Field style replacement, e.g. "姓名: 张三".
     # Covers: 姓名、患者姓名、病史叙述者、送检医师、主管医师、责任护士、联系人、
     #          主治医师、经治医师、报告医师、审核医师、签名 etc.
