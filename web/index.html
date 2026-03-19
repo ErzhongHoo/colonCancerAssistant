@@ -3914,6 +3914,25 @@
       return { sourceDoc, page };
     }
 
+    function normalizePreviewSourceKey(sourceLike) {
+      const raw = String(sourceLike || "").trim();
+      if (!raw.startsWith("viking://resources/")) return raw;
+      try {
+        const decoded = decodeURIComponent(raw);
+        const internalMatch = decoded.match(/(?:^|\/)internal\/(.+)$/);
+        if (internalMatch && internalMatch[1]) {
+          return `internal/${String(internalMatch[1]).replace(/^[/\\]+/, "")}`;
+        }
+        const sessionMatch = decoded.match(/(?:^|\/)session\/(.+)$/);
+        if (sessionMatch && sessionMatch[1]) {
+          return `session/${String(sessionMatch[1]).replace(/^[/\\]+/, "")}`;
+        }
+      } catch (_err) {
+        return raw;
+      }
+      return raw;
+    }
+
     function openSourcePreviewForCitation(msgId, rank) {
       const state = messageEvidenceState.get(String(msgId || ""));
       const src = state?.sourceByRank?.get(Number(rank || 0));
@@ -4130,7 +4149,7 @@
     }
 
     async function openSourcePreview(sourceDoc, page = 0) {
-      const source = String(sourceDoc || "").trim();
+      const source = normalizePreviewSourceKey(sourceDoc);
       const pageNum = Number.isFinite(Number(page)) ? Math.max(0, Math.trunc(Number(page))) : 0;
       if (!source) {
         renderSourcePlaceholder("当前证据没有可回溯的原始文件。");
@@ -4162,7 +4181,8 @@
           try {
             const data = await res.json();
             if (data?.error === "original_not_found") {
-              shouldFallbackToExtractedPreview = source.startsWith("session/");
+              const resolvedSource = normalizePreviewSourceKey(data?.source || "");
+              shouldFallbackToExtractedPreview = source.startsWith("session/") || resolvedSource.startsWith("session/");
               errText = data?.save_upload_originals
                 ? "来源文件不存在或已被清理。"
                 : "未保存原始文件，正在回退到抽取文本预览。";
