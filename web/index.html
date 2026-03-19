@@ -3395,10 +3395,31 @@
     let currentUser = null;
     let isGuest = false;
 
+    function apiPath(path) {
+      return String(path || '').replace(/^\/+/, '');
+    }
+
     function authHeaders() {
       const h = { 'X-Session-ID': pageSessionId };
       if (authToken) h['Authorization'] = `Bearer ${authToken}`;
       return h;
+    }
+
+    async function readApiResponse(resp) {
+      const contentType = String(resp.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('application/json')) {
+        try {
+          return await resp.json();
+        } catch {
+          return null;
+        }
+      }
+      try {
+        const text = await resp.text();
+        return text ? { ok: resp.ok, error: text.slice(0, 240) } : null;
+      } catch {
+        return null;
+      }
     }
 
     // ── Auth UI ──
@@ -3446,7 +3467,7 @@
       authSubmitBtn.disabled = true;
       authSubmitBtn.textContent = '\u8bf7\u7a0d\u5019...';
       try {
-        const url = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
+        const url = authMode === 'register' ? apiPath('/api/auth/register') : apiPath('/api/auth/login');
         const body = authMode === 'register'
           ? { username, password, display_name: displayName || username, invite_code: inviteCode }
           : { username, password };
@@ -3491,7 +3512,7 @@
     let isLoginRequired = false;
     async function checkRequireLogin() {
       try {
-        const res = await fetch('/api/health');
+        const res = await fetch(apiPath('/api/health'));
         const h = await res.json();
         if (h.require_login) {
           isLoginRequired = true;
@@ -3511,7 +3532,7 @@
         return;
       }
       try {
-        const resp = await fetch('/api/auth/me', {
+        const resp = await fetch(apiPath('/api/auth/me'), {
           headers: { 'Authorization': `Bearer ${authToken}` },
         });
         const data = await resp.json();
@@ -3574,7 +3595,7 @@
 
     async function doLogout() {
       try {
-        await fetch('/api/auth/logout', {
+        await fetch(apiPath('/api/auth/logout'), {
           method: 'POST',
           headers: authHeaders(),
         });
@@ -3592,9 +3613,12 @@
       const modal = document.getElementById('account-modal');
       modal.classList.remove('hidden');
       try {
-        const resp = await fetch('/api/auth/me', { headers: authHeaders() });
-        const data = await resp.json();
-        if (!data.ok) return;
+        const resp = await fetch(apiPath('/api/auth/me'), { headers: authHeaders() });
+        const data = await readApiResponse(resp);
+        if (!resp.ok || !data || !data.ok) {
+          alert((data && data.error) || '加载账户信息失败，请稍后重试');
+          return;
+        }
         const stats = data.data_stats || {};
         const user = data.user || {};
         if (user && user.user_id) {
@@ -3630,18 +3654,29 @@
               btn.disabled = true;
               btn.textContent = '...';
               try {
-                await fetch(`/api/user/delete-upload?source=${encodeURIComponent(btn.dataset.source)}`, {
+                const resp = await fetch(`${apiPath('/api/user/delete-upload')}?source=${encodeURIComponent(btn.dataset.source)}`, {
                   method: 'POST', headers: authHeaders(),
                 });
+                const data = await readApiResponse(resp);
+                if (!resp.ok || !data || !data.ok) {
+                  throw new Error((data && data.error) || '删除失败');
+                }
                 openAccountModal(); // refresh
                 refreshTimeline();
-              } catch { }
+              } catch (err) {
+                alert(err && err.message ? err.message : '删除文件失败，请稍后重试');
+              } finally {
+                btn.disabled = false;
+                btn.textContent = '删除';
+              }
             };
           });
         } else {
           document.getElementById('account-sources').innerHTML = '<div class="muted" style="margin-top:12px">\u6682\u65e0\u5df2\u4e0a\u4f20\u6587\u4ef6</div>';
         }
-      } catch { }
+      } catch (_err) {
+        alert('加载账户信息失败，请检查网络或服务器配置');
+      }
     }
 
     function setChangeUsernameMessage(text, isError = false) {
@@ -3669,14 +3704,14 @@
       btn.disabled = true;
       btn.textContent = '保存中...';
       try {
-        const resp = await fetch('/api/user/change-username', {
+        const resp = await fetch(apiPath('/api/user/change-username'), {
           method: 'POST',
           headers: { ...authHeaders(), 'Content-Type': 'application/json' },
           body: JSON.stringify({ new_username: newUsername }),
         });
-        const data = await resp.json();
-        if (!resp.ok || !data.ok) {
-          setChangeUsernameMessage(data.error || '修改失败', true);
+        const data = await readApiResponse(resp);
+        if (!resp.ok || !data || !data.ok) {
+          setChangeUsernameMessage((data && data.error) || '修改失败', true);
           return;
         }
         if (data.user) {
@@ -3700,27 +3735,33 @@
     document.getElementById('delete-all-data-btn').onclick = async () => {
       if (!confirm('\u786e\u5b9a\u6e05\u9664\u6240\u6709\u4e0a\u4f20\u6570\u636e\uff1f\u6b64\u64cd\u4f5c\u4e0d\u53ef\u64a4\u9500\u3002')) return;
       try {
-        await fetch('/api/user/delete-data', {
+        const resp = await fetch(apiPath('/api/user/delete-data'), {
           method: 'POST', headers: authHeaders(),
         });
+        const data = await readApiResponse(resp);
+        if (!resp.ok || !data || !data.ok) {
+          throw new Error((data && data.error) || '清除失败');
+        }
         document.getElementById('account-modal').classList.add('hidden');
         refreshTimeline();
         alert('\u6240\u6709\u6570\u636e\u5df2\u6e05\u9664');
-      } catch { }
+      } catch (err) {
+        alert(err && err.message ? err.message : '清除数据失败，请稍后重试');
+      }
     };
 
     document.getElementById('delete-account-btn').onclick = async () => {
       if (!confirm('\u8b66\u544a\uff1a\u786e\u5b9a\u6ce8\u9500\u8d26\u6237\uff1f\n\u8fd9\u5c06\u6c38\u4e45\u5220\u9664\u8d26\u6237\u53ca\u5176\u6240\u6709\u6570\u636e\uff0c\u65e0\u6cd5\u6062\u590d\u3002')) return;
       try {
-        const resp = await fetch('/api/user/delete-account', {
+        const resp = await fetch(apiPath('/api/user/delete-account'), {
           method: 'POST', headers: authHeaders(),
         });
-        const data = await resp.json();
-        if (data.ok) {
+        const data = await readApiResponse(resp);
+        if (resp.ok && data && data.ok) {
           alert('\u8d26\u6237\u5df2\u6ce8\u9500');
           doLogout();
         } else {
-          alert('\u6ce8\u9500\u5931\u8d25: ' + (data.error || '\u672a\u77e5\u9519\u8bef'));
+          alert('\u6ce8\u9500\u5931\u8d25: ' + ((data && data.error) || '\u672a\u77e5\u9519\u8bef'));
         }
       } catch {
         alert('\u7f51\u7edc\u9519\u8bef');
@@ -4040,7 +4081,7 @@
 
     async function openExtractedSourcePreview(source) {
       if (!sourcePaneBody) return false;
-      const res = await fetch(`/api/upload/debug?source=${encodeURIComponent(source)}&preview_chars=4000`, {
+      const res = await fetch(`${apiPath('/api/upload/debug')}?source=${encodeURIComponent(source)}&preview_chars=4000`, {
         headers: authHeaders(),
         cache: "no-store",
       });
@@ -4111,7 +4152,7 @@
         sourcePaneBody.appendChild(loading);
 
         cleanupSourcePreviewBlob();
-        const res = await fetch(`/api/source/original?source=${encodeURIComponent(source)}`, {
+        const res = await fetch(`${apiPath('/api/source/original')}?source=${encodeURIComponent(source)}`, {
           headers: authHeaders(),
           cache: "no-store",
         });
@@ -4378,7 +4419,7 @@
     async function pollThinkingProgressOnce(requestId) {
       if (!requestId) return;
       try {
-        const res = await fetch(`/api/chat/progress?request_id=${encodeURIComponent(requestId)}`, {
+        const res = await fetch(`${apiPath('/api/chat/progress')}?request_id=${encodeURIComponent(requestId)}`, {
           headers: authHeaders(),
           cache: "no-store",
         });
@@ -4898,7 +4939,7 @@
 
     async function refreshTimeline() {
       try {
-        const res = await fetch("/api/session/timeline", { headers: authHeaders() });
+        const res = await fetch(apiPath('/api/session/timeline'), { headers: authHeaders() });
         const data = await res.json();
         renderTimelinePanel(data.state || {}, data.events || []);
         // Show quick-action chips if any data is available
@@ -5222,7 +5263,7 @@
             progressFileStatus.textContent = "准备 L1/L0 分层记忆...";
           }, 9000);
 
-          const res = await fetch("/api/upload", {
+          const res = await fetch(apiPath('/api/upload'), {
             method: "POST",
             headers: authHeaders(),
             body: form,
@@ -5495,7 +5536,7 @@
         showAssistantLoading(chatRequestId);
 
         try {
-          const res = await fetch("/api/chat", {
+          const res = await fetch(apiPath('/api/chat'), {
             method: "POST",
             headers: {
               "Content-Type": "application/json",

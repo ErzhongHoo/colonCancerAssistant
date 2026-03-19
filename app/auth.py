@@ -380,15 +380,24 @@ class UserManager:
         user_dir = self.user_data_root / user_id
         deleted_files = 0
         deleted_dirs = 0
+        errors: list[dict[str, str]] = []
         if user_dir.exists():
             for f in user_dir.iterdir():
-                if f.is_file():
-                    f.unlink()
-                    deleted_files += 1
-                elif f.is_dir():
-                    shutil.rmtree(f, ignore_errors=True)
-                    deleted_dirs += 1
-        return {"deleted_files": deleted_files, "deleted_dirs": deleted_dirs, "user_id": user_id}
+                try:
+                    if f.is_file() or f.is_symlink():
+                        f.unlink()
+                        deleted_files += 1
+                    elif f.is_dir():
+                        shutil.rmtree(f, ignore_errors=False)
+                        deleted_dirs += 1
+                except Exception as exc:
+                    errors.append({"path": str(f), "error": str(exc)})
+        return {
+            "deleted_files": deleted_files,
+            "deleted_dirs": deleted_dirs,
+            "user_id": user_id,
+            "errors": errors,
+        }
 
     def delete_account(self, username: str) -> bool:
         """Delete a user account and all associated data."""

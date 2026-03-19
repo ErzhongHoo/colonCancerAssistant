@@ -2797,15 +2797,25 @@ def user_delete_data(request: Request) -> JSONResponse:
     user, user_id = _get_auth_user(request)
     if not user:
         return JSONResponse({"ok": False, "error": "not_authenticated"}, status_code=401)
-    result = user_manager.delete_user_data(user_id)
-    user_stores.pop(user_id, None)
-    user_timeline_events.pop(user_id, None)
-    user_openviking_stores.pop(user_id, None)
+    try:
+        result = user_manager.delete_user_data(user_id)
+        user_stores.pop(user_id, None)
+        user_timeline_events.pop(user_id, None)
+        user_openviking_stores.pop(user_id, None)
+    except Exception as exc:
+        audit_logger.log(
+            event_type="user_data_delete_failed",
+            session_id=user_id,
+            details={"error": str(exc)},
+        )
+        return JSONResponse({"ok": False, "error": f"delete_data_failed: {exc}"}, status_code=500)
     audit_logger.log(
         event_type="user_data_deleted",
         session_id=user_id,
         details=result,
     )
+    if result.get("errors"):
+        return JSONResponse({"ok": False, "error": "部分文件删除失败", **result}, status_code=500)
     return JSONResponse({"ok": True, **result})
 
 
@@ -2840,21 +2850,28 @@ def user_delete_account(request: Request) -> JSONResponse:
     user, user_id = _get_auth_user(request)
     if not user:
         return JSONResponse({"ok": False, "error": "not_authenticated"}, status_code=401)
-    
-    # Delete all data first
-    user_manager.delete_user_data(user_id)
-    user_stores.pop(user_id, None)
-    user_timeline_events.pop(user_id, None)
-    user_openviking_stores.pop(user_id, None)
-    
-    # Delete the account record
-    ok = user_manager.delete_account(user.username)
-    
+
+    try:
+        result = user_manager.delete_user_data(user_id)
+        user_stores.pop(user_id, None)
+        user_timeline_events.pop(user_id, None)
+        user_openviking_stores.pop(user_id, None)
+        ok = user_manager.delete_account(user.username)
+    except Exception as exc:
+        audit_logger.log(
+            event_type="user_account_delete_failed",
+            session_id=user_id,
+            details={"error": str(exc), "username": user.username},
+        )
+        return JSONResponse({"ok": False, "error": f"delete_account_failed: {exc}"}, status_code=500)
+
     audit_logger.log(
         event_type="user_account_deleted",
         session_id=user_id,
-        details={"deleted": ok, "username": user.username},
+        details={"deleted": ok, "username": user.username, "data_delete": result},
     )
+    if result.get("errors"):
+        return JSONResponse({"ok": False, "error": "账户数据未完全删除", "details": result}, status_code=500)
     return JSONResponse({"ok": ok})
 
 @app.post("/api/user/delete-upload")
@@ -2864,24 +2881,32 @@ def user_delete_upload(request: Request, source: str = "") -> JSONResponse:
         return JSONResponse({"ok": False, "error": "not_authenticated"}, status_code=401)
     if not source:
         return JSONResponse({"ok": False, "error": "source required"}, status_code=400)
-    full_source = _normalize_upload_source(source)
-    store = _get_or_create_user_store(user_id)
-    original_count = len(store.chunks)
-    store.chunks = [c for c in store.chunks if c.source != full_source]
-    removed_chunks = original_count - len(store.chunks)
-    if hasattr(store, '_persist'):
-        store._persist()
-    events = _load_user_timeline(user_id)
-    original_events = len(events)
-    events = [ev for ev in events if ev.source != full_source]
-    user_timeline_events[user_id] = events
-    _save_user_timeline(user_id)
-    removed_events = original_events - len(events)
-    layered_store = _get_or_create_user_openviking_store(user_id)
-    removed_layers = layered_store.remove_source(full_source)
-    removed_original = _delete_upload_original(full_source, user_id=user_id)
-    removed_masked_original = _delete_upload_original(_masked_upload_source_name(full_source), user_id=user_id)
-    removed_preview_meta = _delete_upload_preview_meta(full_source, user_id=user_id)
+    try:
+        full_source = _normalize_upload_source(source)
+        store = _get_or_create_user_store(user_id)
+        original_count = len(store.chunks)
+        store.chunks = [c for c in store.chunks if c.source != full_source]
+        removed_chunks = original_count - len(store.chunks)
+        if hasattr(store, '_persist'):
+            store._persist()
+        events = _load_user_timeline(user_id)
+        original_events = len(events)
+        events = [ev for ev in events if ev.source != full_source]
+        user_timeline_events[user_id] = events
+        _save_user_timeline(user_id)
+        removed_events = original_events - len(events)
+        layered_store = _get_or_create_user_openviking_store(user_id)
+        removed_layers = layered_store.remove_source(full_source)
+        removed_original = _delete_upload_original(full_source, user_id=user_id)
+        removed_masked_original = _delete_upload_original(_masked_upload_source_name(full_source), user_id=user_id)
+        removed_preview_meta = _delete_upload_preview_meta(full_source, user_id=user_id)
+    except Exception as exc:
+        audit_logger.log(
+            event_type="user_upload_delete_failed",
+            session_id=user_id,
+            details={"error": str(exc), "source": source},
+        )
+        return JSONResponse({"ok": False, "error": f"delete_upload_failed: {exc}"}, status_code=500)
     return JSONResponse({
         "ok": True,
         "removed_chunks": removed_chunks,
