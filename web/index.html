@@ -5301,7 +5301,13 @@
           clearTimeout(stageTimer3);
           clearTimeout(stageTimer4);
 
-          const data = await res.json();
+          const data = await readApiResponse(res);
+          if (!data) {
+            throw new Error(res.ok ? "服务端返回空响应" : `HTTP ${res.status}`);
+          }
+          if (!res.ok) {
+            throw new Error(data.error || data.detail || data.msg || `HTTP ${res.status}`);
+          }
           completed++;
           setProgressPercent((completed / total) * 100);
           markAllStepsDone();
