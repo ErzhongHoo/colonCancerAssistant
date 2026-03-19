@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import atexit
 import io
 import multiprocessing as mp
 import os
+import threading
+import time
+import warnings
 from functools import lru_cache
+from queue import Empty
 from typing import Any
 
 import numpy as np
@@ -15,21 +20,66 @@ PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS = max(
     5.0,
 )
 
+_PADDLE_OCR_CONTEXT = mp.get_context("spawn")
+_PADDLE_OCR_WORKERS_LOCK = threading.Lock()
+_PADDLE_OCR_WORKERS: dict[str, "_PaddleOCRWorker"] = {}
+
 
 @lru_cache(maxsize=1)
 def _build_paddle_ocr(lang: str = "ch") -> Any:
-    from paddleocr import PaddleOCR  # type: ignore
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=".*No ccache found.*",
+            category=UserWarning,
+        )
+        from paddleocr import PaddleOCR  # type: ignore
 
-    return PaddleOCR(use_angle_cls=True, lang=lang)
+    return PaddleOCR(use_angle_cls=True, lang=lang, show_log=False)
 
 
 def is_paddle_available() -> bool:
     try:
-        import paddleocr  # type: ignore  # noqa: F401
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=".*No ccache found.*",
+                category=UserWarning,
+            )
+            import paddleocr  # type: ignore  # noqa: F401
 
         return True
     except Exception:
         return False
+
+
+def _run_paddle_ocr_task(
+    image_bytes: bytes,
+    lang: str,
+    detailed: bool,
+    ocr: Any,
+) -> dict[str, Any]:
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    if detailed:
+        best_words: list[dict[str, Any]] = []
+        best_text = ""
+        best_score = -1.0
+        for variant in _build_ocr_variants(image):
+            img_np = np.array(variant)
+            result = ocr.ocr(img_np, cls=True)
+            words = _parse_paddle_result_detailed(result)
+            text = "\n".join(item["text"] for item in words).strip()
+            score = float(sum(len(item["text"]) for item in words))
+            if score > best_score:
+                best_score = score
+                best_words = words
+                best_text = text
+        return {"ok": True, "text": best_text, "words": best_words}
+
+    img_np = np.array(image)
+    result = ocr.ocr(img_np, cls=True)
+    lines = _parse_paddle_result(result)
+    return {"ok": True, "text": "\n".join(lines).strip()}
 
 
 def _paddle_ocr_worker(
@@ -38,71 +88,175 @@ def _paddle_ocr_worker(
     detailed: bool,
     queue: Any,
 ) -> None:
+    """
+    Compatibility shim for already-running parent processes that still spawn the
+    previous one-shot worker entrypoint by name.
+    """
     try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         ocr = _build_paddle_ocr(lang=lang)
-        if detailed:
-            best_words: list[dict[str, Any]] = []
-            best_text = ""
-            best_score = -1.0
-            for variant in _build_ocr_variants(image):
-                img_np = np.array(variant)
-                result = ocr.ocr(img_np, cls=True)
-                words = _parse_paddle_result_detailed(result)
-                text = "\n".join(item["text"] for item in words).strip()
-                score = float(sum(len(item["text"]) for item in words))
-                if score > best_score:
-                    best_score = score
-                    best_words = words
-                    best_text = text
-            queue.put({"ok": True, "text": best_text, "words": best_words})
-            return
-
-        img_np = np.array(image)
-        result = ocr.ocr(img_np, cls=True)
-        lines = _parse_paddle_result(result)
-        queue.put({"ok": True, "text": "\n".join(lines).strip()})
+        queue.put(
+            _run_paddle_ocr_task(
+                image_bytes=image_bytes,
+                lang=lang,
+                detailed=detailed,
+                ocr=ocr,
+            )
+        )
     except Exception as exc:
         queue.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
 
-def _run_paddle_ocr_in_subprocess(
+def _paddle_ocr_worker_loop(lang: str, task_queue: Any, result_queue: Any) -> None:
+    try:
+        ocr = _build_paddle_ocr(lang=lang)
+    except Exception as exc:
+        result_queue.put({"request_id": None, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        return
+
+    while True:
+        task = task_queue.get()
+        if not isinstance(task, dict):
+            continue
+        if task.get("cmd") == "shutdown":
+            return
+        request_id = task.get("request_id")
+        try:
+            payload = _run_paddle_ocr_task(
+                image_bytes=bytes(task.get("image_bytes") or b""),
+                lang=lang,
+                detailed=bool(task.get("detailed")),
+                ocr=ocr,
+            )
+            payload["request_id"] = request_id
+            result_queue.put(payload)
+        except Exception as exc:
+            result_queue.put(
+                {
+                    "request_id": request_id,
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+
+
+class _PaddleOCRWorker:
+    def __init__(self, lang: str) -> None:
+        self.lang = lang
+        self.task_queue = _PADDLE_OCR_CONTEXT.Queue(maxsize=1)
+        self.result_queue = _PADDLE_OCR_CONTEXT.Queue(maxsize=1)
+        self.lock = threading.Lock()
+        self.proc = _PADDLE_OCR_CONTEXT.Process(
+            target=_paddle_ocr_worker_loop,
+            args=(lang, self.task_queue, self.result_queue),
+            daemon=True,
+        )
+        self.proc.start()
+
+    def shutdown(self) -> None:
+        try:
+            if self.proc.is_alive():
+                try:
+                    self.task_queue.put_nowait({"cmd": "shutdown"})
+                except Exception:
+                    pass
+                self.proc.join(timeout=1.0)
+            if self.proc.is_alive():
+                self.proc.terminate()
+                self.proc.join(timeout=1.0)
+        finally:
+            try:
+                self.task_queue.close()
+                self.task_queue.join_thread()
+            except Exception:
+                pass
+            try:
+                self.result_queue.close()
+                self.result_queue.join_thread()
+            except Exception:
+                pass
+
+
+def _get_paddle_worker(lang: str) -> _PaddleOCRWorker:
+    with _PADDLE_OCR_WORKERS_LOCK:
+        worker = _PADDLE_OCR_WORKERS.get(lang)
+        if worker is not None and worker.proc.is_alive():
+            return worker
+        if worker is not None:
+            worker.shutdown()
+        worker = _PaddleOCRWorker(lang=lang)
+        _PADDLE_OCR_WORKERS[lang] = worker
+        return worker
+
+
+def _discard_paddle_worker(lang: str, worker: _PaddleOCRWorker) -> None:
+    with _PADDLE_OCR_WORKERS_LOCK:
+        current = _PADDLE_OCR_WORKERS.get(lang)
+        if current is worker:
+            _PADDLE_OCR_WORKERS.pop(lang, None)
+    worker.shutdown()
+
+
+def _shutdown_paddle_workers() -> None:
+    with _PADDLE_OCR_WORKERS_LOCK:
+        workers = list(_PADDLE_OCR_WORKERS.values())
+        _PADDLE_OCR_WORKERS.clear()
+    for worker in workers:
+        worker.shutdown()
+
+
+atexit.register(_shutdown_paddle_workers)
+
+
+def _run_paddle_ocr_in_worker(
     image_bytes: bytes,
     lang: str = "ch",
     *,
     detailed: bool = False,
 ) -> dict[str, Any]:
-    ctx = mp.get_context("spawn")
-    queue = ctx.Queue(maxsize=1)
-    proc = ctx.Process(
-        target=_paddle_ocr_worker,
-        args=(image_bytes, lang, detailed, queue),
-        daemon=True,
-    )
-    proc.start()
-    proc.join(PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS)
+    worker = _get_paddle_worker(lang=lang)
+    request_id = f"{time.monotonic_ns()}:{threading.get_ident()}"
+    timeout_at = time.monotonic() + PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS
 
-    if proc.is_alive():
-        proc.terminate()
-        proc.join()
-        raise TimeoutError(
-            f"PaddleOCR 子进程超时（>{PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS:.0f}s）"
-        )
+    with worker.lock:
+        try:
+            worker.task_queue.put(
+                {
+                    "request_id": request_id,
+                    "image_bytes": image_bytes,
+                    "detailed": detailed,
+                },
+                timeout=PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            _discard_paddle_worker(lang, worker)
+            raise RuntimeError("PaddleOCR worker 请求投递失败")
 
-    payload: dict[str, Any] | None = None
-    try:
-        if not queue.empty():
-            payload = queue.get_nowait()
-    except Exception:
-        payload = None
-    finally:
-        queue.close()
-        queue.join_thread()
+        payload: dict[str, Any] | None = None
+        while time.monotonic() < timeout_at:
+            remaining = max(timeout_at - time.monotonic(), 0.0)
+            wait_timeout = min(remaining, 0.5)
+            try:
+                candidate = worker.result_queue.get(timeout=wait_timeout)
+            except Empty:
+                if not worker.proc.is_alive():
+                    _discard_paddle_worker(lang, worker)
+                    raise RuntimeError("PaddleOCR worker 异常退出")
+                continue
+            if isinstance(candidate, dict) and candidate.get("request_id") == request_id:
+                payload = candidate
+                break
+            if isinstance(candidate, dict) and candidate.get("request_id") is None:
+                _discard_paddle_worker(lang, worker)
+                raise RuntimeError(str(candidate.get("error", "PaddleOCR 初始化失败")))
 
-    if proc.exitcode != 0:
-        raise RuntimeError(f"PaddleOCR 子进程异常退出（exitcode={proc.exitcode}）")
+        if payload is None:
+            _discard_paddle_worker(lang, worker)
+            raise TimeoutError(
+                f"PaddleOCR worker 超时（>{PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS:.0f}s）"
+            )
+
     if not isinstance(payload, dict):
-        raise RuntimeError("PaddleOCR 子进程未返回结果")
+        raise RuntimeError("PaddleOCR worker 未返回结果")
     if not payload.get("ok"):
         raise RuntimeError(str(payload.get("error", "PaddleOCR 执行失败")))
     return payload
@@ -111,14 +265,14 @@ def _run_paddle_ocr_in_subprocess(
 def ocr_with_paddle_bytes(image_bytes: bytes, lang: str = "ch") -> str:
     if not is_paddle_available():
         raise RuntimeError("PaddleOCR 未安装，请先安装 paddleocr/paddlepaddle。")
-    payload = _run_paddle_ocr_in_subprocess(image_bytes, lang=lang, detailed=False)
+    payload = _run_paddle_ocr_in_worker(image_bytes, lang=lang, detailed=False)
     return str(payload.get("text", "") or "").strip()
 
 
 def ocr_with_paddle_bytes_detailed(image_bytes: bytes, lang: str = "ch") -> dict[str, Any]:
     if not is_paddle_available():
         raise RuntimeError("PaddleOCR 未安装，请先安装 paddleocr/paddlepaddle。")
-    payload = _run_paddle_ocr_in_subprocess(image_bytes, lang=lang, detailed=True)
+    payload = _run_paddle_ocr_in_worker(image_bytes, lang=lang, detailed=True)
     return {
         "text": str(payload.get("text", "") or "").strip(),
         "words": list(payload.get("words") or []),
