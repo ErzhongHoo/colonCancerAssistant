@@ -5087,6 +5087,13 @@
           });
           card.appendChild(statsBar);
 
+          if (!imageRedaction.available && imageRedaction.reason && imageRedaction.reason !== "not_image") {
+            const note = document.createElement("div");
+            note.className = "source-text-note";
+            note.textContent = `图片脱敏预览未生成：${imageRedaction.reason}`;
+            card.appendChild(note);
+          }
+
           if (hasImageRedaction && imageRedaction.masked_data_url) {
             const toggleBar = document.createElement("div");
             toggleBar.className = "redact-toggle-bar";
@@ -5381,6 +5388,13 @@
             statsBar.appendChild(tag);
           });
           card.appendChild(statsBar);
+
+          if (!imageRedaction.available && imageRedaction.reason && imageRedaction.reason !== "not_image") {
+            const note = document.createElement("div");
+            note.className = "source-text-note";
+            note.textContent = `图片脱敏预览未生成：${imageRedaction.reason}`;
+            card.appendChild(note);
+          }
 
           // Image toggle (original vs masked)
           if (hasImageRedaction && imageRedaction.masked_data_url) {

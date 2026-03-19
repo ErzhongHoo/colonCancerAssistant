@@ -42,6 +42,7 @@ from app.llm import (
     extract_date_fields_with_vision_bytes,
     extract_date_with_vision_bytes,
     ocr_with_aliyun_ocr_bytes,
+    ocr_with_aliyun_ocr_bytes_detailed,
     ocr_with_vision_bytes,
     ocr_with_vision_bytes_transcribe,
 )
@@ -1739,27 +1740,48 @@ def _extract_image_text_with_date(
 
 
 def _build_image_redaction_result(file_bytes: bytes, mime_type: str) -> dict[str, Any]:
-    if not is_paddle_available():
+    words: list[dict[str, Any]] = []
+    engine = "none"
+    ocr_error = ""
+    if is_paddle_available():
+        try:
+            detailed = ocr_with_paddle_bytes_detailed(file_bytes, lang=PADDLE_OCR_LANG)
+            words = detailed.get("words", []) if isinstance(detailed, dict) else []
+            engine = "paddle"
+        except Exception as exc:
+            ocr_error = f"ocr_failed:{exc}"
+            engine = "paddle"
+    elif OCR_PROVIDER in {"auto", "aliyun"}:
+        try:
+            client = build_client()
+            detailed = ocr_with_aliyun_ocr_bytes_detailed(
+                client,
+                ALIYUN_OCR_MODEL,
+                file_bytes,
+                mime_type=mime_type,
+                min_pixels=ALIYUN_OCR_MIN_PIXELS,
+                max_pixels=ALIYUN_OCR_MAX_PIXELS,
+            )
+            words = detailed.get("words", []) if isinstance(detailed, dict) else []
+            engine = "aliyun"
+            if not words:
+                ocr_error = "ocr_failed:no_coordinate_words"
+        except Exception as exc:
+            ocr_error = f"ocr_failed:{exc}"
+            engine = "aliyun"
+    else:
+        ocr_error = "paddle_unavailable"
+
+    if not words:
         return {
             "available": False,
-            "engine": "none",
-            "reason": "paddle_unavailable",
+            "engine": engine,
+            "reason": ocr_error or "paddle_unavailable",
             "ocr_word_count": 0,
             "sensitive_box_count": 0,
             "boxes": [],
         }
-    try:
-        detailed = ocr_with_paddle_bytes_detailed(file_bytes, lang=PADDLE_OCR_LANG)
-    except Exception as exc:
-        return {
-            "available": False,
-            "engine": "paddle",
-            "reason": f"ocr_failed:{exc}",
-            "ocr_word_count": 0,
-            "sensitive_box_count": 0,
-            "boxes": [],
-        }
-    words = detailed.get("words", []) if isinstance(detailed, dict) else []
+
     image = Image.open(io.BytesIO(file_bytes))
     width, height = image.size
     boxes: list[dict[str, Any]] = []

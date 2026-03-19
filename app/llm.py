@@ -143,6 +143,36 @@ def ocr_with_aliyun_ocr_bytes(
     return first
 
 
+def ocr_with_aliyun_ocr_bytes_detailed(
+    client: OpenAI,
+    model: str,
+    image_bytes: bytes,
+    mime_type: str = "image/png",
+    min_pixels: int = 3072,
+    max_pixels: int = 8_388_608,
+) -> dict[str, object]:
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{mime_type};base64,{encoded}"
+    image_item: dict[str, object] = {
+        "type": "image_url",
+        "image_url": {"url": data_url},
+    }
+    if min_pixels > 0:
+        image_item["min_pixels"] = int(min_pixels)
+    if max_pixels > 0:
+        image_item["max_pixels"] = int(max_pixels)
+
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": [image_item]}],
+        temperature=0.1,
+    )
+    raw = str(resp.choices[0].message.content or "").strip()
+    words = _parse_aliyun_ocr_detailed(raw)
+    text = "\n".join(item["text"] for item in words if str(item.get("text", "")).strip()).strip()
+    return {"text": text, "words": words, "raw": raw}
+
+
 _COORD_NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
 
 
@@ -177,6 +207,40 @@ def _is_coord_only_aliyun_output(text: str) -> bool:
         if len(parts) == 5 and all(_COORD_NUM_RE.match(part) for part in parts):
             coord_lines += 1
     return coord_lines == len(lines)
+
+
+def _parse_aliyun_ocr_detailed(raw: str) -> list[dict[str, object]]:
+    lines = [line.strip() for line in str(raw or "").splitlines() if line.strip()]
+    words: list[dict[str, object]] = []
+    for line in lines:
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 6:
+            continue
+        numeric = parts[:5]
+        if not all(_COORD_NUM_RE.match(part) for part in numeric):
+            continue
+        text = ",".join(parts[5:]).strip()
+        if not text:
+            continue
+        try:
+            x1 = int(float(parts[0]))
+            y1 = int(float(parts[1]))
+            x2 = int(float(parts[2]))
+            y2 = int(float(parts[3]))
+        except Exception:
+            continue
+        x1, x2 = sorted((x1, x2))
+        y1, y2 = sorted((y1, y2))
+        words.append(
+            {
+                "text": text,
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
+            }
+        )
+    return words
 
 
 def extract_date_with_vision_bytes(
