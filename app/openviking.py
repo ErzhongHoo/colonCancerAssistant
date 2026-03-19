@@ -43,9 +43,13 @@ _NATIVE_INIT_ERROR: str = ""
 
 def _native_storage_path() -> Path:
     raw = os.getenv("OPENVIKING_NATIVE_STORAGE_PATH", "")
+    root = Path(__file__).resolve().parent.parent
     if raw.strip():
-        return Path(raw).expanduser().resolve()
-    return (Path.cwd() / "data" / "openviking_native").resolve()
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            p = root / p
+        return p.resolve()
+    return (root / "data" / "openviking_native").resolve()
 
 
 def _native_dimension() -> int:

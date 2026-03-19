@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import io
+import multiprocessing as mp
+import os
 from functools import lru_cache
 from typing import Any
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+
+
+PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS = max(
+    float(os.getenv("PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS", "45") or 45.0),
+    5.0,
+)
 
 
 @lru_cache(maxsize=1)
@@ -24,39 +32,97 @@ def is_paddle_available() -> bool:
         return False
 
 
+def _paddle_ocr_worker(
+    image_bytes: bytes,
+    lang: str,
+    detailed: bool,
+    queue: Any,
+) -> None:
+    try:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        ocr = _build_paddle_ocr(lang=lang)
+        if detailed:
+            best_words: list[dict[str, Any]] = []
+            best_text = ""
+            best_score = -1.0
+            for variant in _build_ocr_variants(image):
+                img_np = np.array(variant)
+                result = ocr.ocr(img_np, cls=True)
+                words = _parse_paddle_result_detailed(result)
+                text = "\n".join(item["text"] for item in words).strip()
+                score = float(sum(len(item["text"]) for item in words))
+                if score > best_score:
+                    best_score = score
+                    best_words = words
+                    best_text = text
+            queue.put({"ok": True, "text": best_text, "words": best_words})
+            return
+
+        img_np = np.array(image)
+        result = ocr.ocr(img_np, cls=True)
+        lines = _parse_paddle_result(result)
+        queue.put({"ok": True, "text": "\n".join(lines).strip()})
+    except Exception as exc:
+        queue.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+def _run_paddle_ocr_in_subprocess(
+    image_bytes: bytes,
+    lang: str = "ch",
+    *,
+    detailed: bool = False,
+) -> dict[str, Any]:
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue(maxsize=1)
+    proc = ctx.Process(
+        target=_paddle_ocr_worker,
+        args=(image_bytes, lang, detailed, queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        raise TimeoutError(
+            f"PaddleOCR 子进程超时（>{PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS:.0f}s）"
+        )
+
+    payload: dict[str, Any] | None = None
+    try:
+        if not queue.empty():
+            payload = queue.get_nowait()
+    except Exception:
+        payload = None
+    finally:
+        queue.close()
+        queue.join_thread()
+
+    if proc.exitcode != 0:
+        raise RuntimeError(f"PaddleOCR 子进程异常退出（exitcode={proc.exitcode}）")
+    if not isinstance(payload, dict):
+        raise RuntimeError("PaddleOCR 子进程未返回结果")
+    if not payload.get("ok"):
+        raise RuntimeError(str(payload.get("error", "PaddleOCR 执行失败")))
+    return payload
+
+
 def ocr_with_paddle_bytes(image_bytes: bytes, lang: str = "ch") -> str:
     if not is_paddle_available():
         raise RuntimeError("PaddleOCR 未安装，请先安装 paddleocr/paddlepaddle。")
-
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img_np = np.array(image)
-    ocr = _build_paddle_ocr(lang=lang)
-    result = ocr.ocr(img_np, cls=True)
-    lines = _parse_paddle_result(result)
-    return "\n".join(lines).strip()
+    payload = _run_paddle_ocr_in_subprocess(image_bytes, lang=lang, detailed=False)
+    return str(payload.get("text", "") or "").strip()
 
 
 def ocr_with_paddle_bytes_detailed(image_bytes: bytes, lang: str = "ch") -> dict[str, Any]:
     if not is_paddle_available():
         raise RuntimeError("PaddleOCR 未安装，请先安装 paddleocr/paddlepaddle。")
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    ocr = _build_paddle_ocr(lang=lang)
-    best_words: list[dict[str, Any]] = []
-    best_text = ""
-    best_score = -1.0
-
-    for variant in _build_ocr_variants(image):
-        img_np = np.array(variant)
-        result = ocr.ocr(img_np, cls=True)
-        words = _parse_paddle_result_detailed(result)
-        text = "\n".join(item["text"] for item in words).strip()
-        score = float(sum(len(item["text"]) for item in words))
-        if score > best_score:
-            best_score = score
-            best_words = words
-            best_text = text
-
-    return {"text": best_text, "words": best_words}
+    payload = _run_paddle_ocr_in_subprocess(image_bytes, lang=lang, detailed=True)
+    return {
+        "text": str(payload.get("text", "") or "").strip(),
+        "words": list(payload.get("words") or []),
+    }
 
 
 def draw_redaction_boxes(

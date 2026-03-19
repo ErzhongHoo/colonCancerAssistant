@@ -18,7 +18,7 @@ from typing import Any, Callable
 from urllib.parse import quote, unquote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image
 from pydantic import BaseModel
@@ -159,6 +159,9 @@ OPENVIKING_RAG_DEEP_L2_BUDGET = max(int(os.getenv("OPENVIKING_RAG_DEEP_L2_BUDGET
 OPENVIKING_INTERNAL_COMPLEX_SEARCH = (
     os.getenv("OPENVIKING_INTERNAL_COMPLEX_SEARCH", "false").strip().lower() in {"1", "true", "yes", "on"}
 )
+OPENVIKING_BLOCK_UPLOAD = (
+    os.getenv("OPENVIKING_BLOCK_UPLOAD", "false").strip().lower() in {"1", "true", "yes", "on"}
+)
 _chat_timeout_raw = os.getenv("CHAT_COMPLETION_TIMEOUT_SECONDS", "120").strip().lower()
 if _chat_timeout_raw in {"0", "none", "off", "false", "no"}:
     CHAT_COMPLETION_TIMEOUT_SECONDS: float | None = None
@@ -284,6 +287,7 @@ chat_progress_lock = threading.Lock()
 CHAT_PROGRESS_STEPS: list[tuple[str, str]] = [
     ("accepted", "请求已接收"),
     ("analyzing_question", "解析问题"),
+    ("preparing_index", "建立索引"),
     ("retrieving_evidence", "检索证据"),
     ("building_context", "组装证据"),
     ("generating_answer", "生成答案"),
@@ -795,8 +799,11 @@ def _guess_file_media_type(file_path: Path, source_hint: str = "") -> str:
 def _native_storage_root_path() -> Path:
     raw = os.getenv("OPENVIKING_NATIVE_STORAGE_PATH", "").strip()
     if raw:
-        return Path(raw).expanduser().resolve()
-    return (Path.cwd() / "data" / "openviking_native").resolve()
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            p = ROOT / p
+        return p.resolve()
+    return (ROOT / "data" / "openviking_native").resolve()
 
 
 def _resolve_native_source_markdown(user_id: str, source: str) -> Path | None:
@@ -1050,9 +1057,14 @@ def _fallback_openviking_layers(source: str, chunks: list[Any]) -> tuple[str, li
     return l0[:260], l1[:3]
 
 
-def _generate_openviking_layers(source: str, chunks: list[Any]) -> tuple[str, list[dict[str, Any]]]:
+def _generate_openviking_layers(
+    source: str,
+    chunks: list[Any],
+    *,
+    allow_llm: bool = True,
+) -> tuple[str, list[dict[str, Any]]]:
     fallback_l0, fallback_l1 = _fallback_openviking_layers(source, chunks)
-    if not OPENVIKING_USE_LLM:
+    if not OPENVIKING_USE_LLM or not allow_llm:
         return fallback_l0, fallback_l1
     lines: list[str] = []
     total_chars = 0
@@ -1125,10 +1137,16 @@ def _generate_openviking_layers(source: str, chunks: list[Any]) -> tuple[str, li
         return fallback_l0, fallback_l1
 
 
-def _upsert_openviking_layers(store: OpenVikingStore, source: str, chunks: list[Any]) -> dict[str, int]:
+def _upsert_openviking_layers(
+    store: OpenVikingStore,
+    source: str,
+    chunks: list[Any],
+    *,
+    allow_llm: bool = True,
+) -> dict[str, int]:
     if not OPENVIKING_ENABLED:
         return {"l0": 0, "l1": 0}
-    l0_text, l1_items = _generate_openviking_layers(source, chunks)
+    l0_text, l1_items = _generate_openviking_layers(source, chunks, allow_llm=allow_llm)
     l2_texts = [str(getattr(c, "text", "") or "").strip() for c in chunks]
     return store.upsert_source_layers(
         source=source,
@@ -1137,6 +1155,43 @@ def _upsert_openviking_layers(store: OpenVikingStore, source: str, chunks: list[
         embed_fn=_global_embed,
         l2_texts=[x for x in l2_texts if x],
     )
+
+
+def _background_upsert_openviking_layers(
+    store: OpenVikingStore,
+    source: str,
+    chunks: list[Any],
+    *,
+    actor_id: str,
+    file_name: str,
+) -> None:
+    call_t0 = time.perf_counter()
+    try:
+        stats = _upsert_openviking_layers(store, source, chunks)
+        audit_logger.log(
+            event_type="openviking_upload_completed",
+            session_id=actor_id,
+            details={
+                "file": file_name,
+                "source": source,
+                "openviking_l0": int(stats.get("l0", 0) or 0),
+                "openviking_l1": int(stats.get("l1", 0) or 0),
+                "openviking_ms": round(_ms(call_t0), 2),
+                "blocking_upload": False,
+            },
+        )
+    except Exception as exc:
+        audit_logger.log(
+            event_type="openviking_upload_failed",
+            session_id=actor_id,
+            details={
+                "file": file_name,
+                "source": source,
+                "error": f"{type(exc).__name__}: {exc}",
+                "openviking_ms": round(_ms(call_t0), 2),
+                "blocking_upload": False,
+            },
+        )
 
 
 def _build_evidence_snippet(text: str, query: str, max_chars: int = OPENVIKING_EVIDENCE_SNIPPET_MAX_CHARS) -> str:
@@ -1256,10 +1311,23 @@ def _build_source_text_index(vector_store: VectorStore | None) -> dict[str, str]
     return out
 
 
+def _count_vector_store_sources(vector_store: VectorStore | None) -> int:
+    if vector_store is None:
+        return 0
+    sources = {
+        str(getattr(chunk, "source", "") or "").strip()
+        for chunk in getattr(vector_store, "chunks", [])
+        if str(getattr(chunk, "source", "") or "").strip()
+    }
+    return len(sources)
+
+
 def _rebuild_openviking_from_vector_store(
     layered_store: OpenVikingStore,
     vector_store: VectorStore | None,
     reset: bool = True,
+    *,
+    allow_llm: bool = True,
 ) -> dict[str, Any]:
     if vector_store is None:
         return {"sources": 0, "rebuilt": [], "stats": layered_store.stats()}
@@ -1278,7 +1346,7 @@ def _rebuild_openviking_from_vector_store(
     rebuilt: list[dict[str, Any]] = []
     for src in sorted(source_map.keys()):
         chunks = source_map[src]
-        stats = _upsert_openviking_layers(layered_store, src, chunks)
+        stats = _upsert_openviking_layers(layered_store, src, chunks, allow_llm=allow_llm)
         rebuilt.append(
             {
                 "source": src,
@@ -2318,6 +2386,27 @@ def _extract_evidence_ranks(answer: str) -> set[int]:
     return ranks
 
 
+def _strip_evidence_citations(answer: str) -> str:
+    text = str(answer or "")
+    if not text:
+        return text
+    text = re.sub(
+        r"\[(?:证据|evidence)\s*#\s*\d+(?:\s*@\s*[A-Za-z0-9?_+\-]+)?\]",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\[source:\s*[^\]]+\]",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def _normalize_answer_citations(answer: str, ranked_sources: list[dict[str, Any]] | None = None) -> str:
     _ = ranked_sources
     text = str(answer or "")
@@ -2725,7 +2814,11 @@ def bootstrap_literature_agent() -> None:
 
 
 @app.post("/api/upload")
-async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONResponse:
+async def upload(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+) -> JSONResponse:
     _auth_user, auth_user_id = _get_auth_user(request)
     check_require_login(auth_user_id)
     session_id = _get_session_id(request)
@@ -2755,13 +2848,6 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
             file_bytes = await f.read()
             stage_ms["read_bytes_ms"] = round(_ms(stage_t0), 2)
             original_file = {"saved": False, "path": "", "size": int(len(file_bytes))}
-            if SAVE_UPLOAD_ORIGINALS:
-                original_file = _save_upload_original(
-                    source_key,
-                    file_bytes,
-                    user_id=auth_user_id,
-                    session_id=None if auth_user_id else session_id,
-                )
             stage_t0 = time.perf_counter()
             text, extract_meta = _extract_file_text_from_bytes(file_name, f.content_type, file_bytes)
             stage_ms["extract_text_ms"] = round(_ms(stage_t0), 2)
@@ -2785,10 +2871,31 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
             if is_image and ENABLE_UPLOAD_DEID:
                 image_redaction = _build_image_redaction_result(file_bytes, mime_type=input_mime)
             stage_ms["image_redaction_ms"] = round(_ms(stage_t0), 2)
-            # Save masked version of image alongside original for source preview
+            if SAVE_UPLOAD_ORIGINALS:
+                if not is_image:
+                    original_file = _save_upload_original(
+                        source_key,
+                        file_bytes,
+                        user_id=auth_user_id,
+                        session_id=None if auth_user_id else session_id,
+                    )
+                else:
+                    image_has_sensitive_boxes = int(image_redaction.get("sensitive_box_count", 0) or 0) > 0
+                    image_privacy_cleared = (
+                        ENABLE_UPLOAD_DEID
+                        and not image_has_sensitive_boxes
+                        and str(image_redaction.get("reason", "") or "") == "no_sensitive_boxes"
+                    )
+                    if image_privacy_cleared:
+                        original_file = _save_upload_original(
+                            source_key,
+                            file_bytes,
+                            user_id=auth_user_id,
+                            session_id=None if auth_user_id else session_id,
+                        )
+            # Save masked image for source preview even when raw originals are disabled.
             if (
                 is_image
-                and SAVE_UPLOAD_ORIGINALS
                 and image_redaction.get("available")
                 and image_redaction.get("masked_data_url")
             ):
@@ -2815,6 +2922,7 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
             )
             stage_ms["vector_add_ms"] = round(_ms(stage_t0), 2)
             layered_stats = {"l0": 0, "l1": 0}
+            openviking_pending = False
             source_chunks: list[Any] = []
             if active_openviking_store is not None:
                 stage_t0 = time.perf_counter()
@@ -2838,7 +2946,7 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
                     user_id=auth_user_id,
                 )
                 openviking_future: concurrent.futures.Future[tuple[Any, float]] | None = None
-                if active_openviking_store is not None:
+                if active_openviking_store is not None and OPENVIKING_BLOCK_UPLOAD:
                     openviking_future = executor.submit(
                         _timed_call,
                         _upsert_openviking_layers,
@@ -2855,6 +2963,16 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
                     stage_ms["openviking_ms"] = round(openviking_elapsed, 2)
                 else:
                     stage_ms["openviking_ms"] = 0.0
+                    if active_openviking_store is not None and source_chunks:
+                        openviking_pending = True
+                        background_tasks.add_task(
+                            _background_upsert_openviking_layers,
+                            active_openviking_store,
+                            source_key,
+                            source_chunks,
+                            actor_id=auth_user_id or session_id,
+                            file_name=file_name,
+                        )
 
             processing_ms = round(_ms(file_start), 2)
             stage_ms["total_ms"] = processing_ms
@@ -2872,6 +2990,7 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
                     "timeline_events": extracted_events,
                     "openviking_l0": layered_stats.get("l0", 0),
                     "openviking_l1": layered_stats.get("l1", 0),
+                    "openviking_pending": openviking_pending,
                     "processing_ms": processing_ms,
                     "stage_ms": stage_ms,
                     "date_detected": has_known_date,
@@ -2902,6 +3021,7 @@ async def upload(request: Request, files: list[UploadFile] = File(...)) -> JSONR
                     "timeline_events": extracted_events,
                     "openviking_l0": layered_stats.get("l0", 0),
                     "openviking_l1": layered_stats.get("l1", 0),
+                    "openviking_pending": openviking_pending,
                     "processing_ms": processing_ms,
                     "stage_ms": stage_ms,
                     "date_detected": has_known_date,
@@ -3104,6 +3224,25 @@ def source_original(request: Request, source: str = "") -> Response:
         session_id=None if auth_user_id else session_id,
     )
     if file_path is None:
+        masked_path = None
+        normalized_source_key = str(source_key or "").strip()
+        if normalized_source_key.startswith("session/"):
+            masked_path, _ = _resolve_original_file_for_source(
+                _masked_upload_source_name(normalized_source_key),
+                user_id=auth_user_id,
+                session_id=None if auth_user_id else session_id,
+            )
+        if masked_path is not None:
+            return FileResponse(
+                masked_path,
+                media_type="image/jpeg",
+                filename=masked_path.name,
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Source-Key": _safe_header_value(normalized_source_key),
+                    "X-Source-Redacted": "1",
+                },
+            )
         return JSONResponse(
             {
                 "ok": False,
@@ -3416,13 +3555,25 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
         if user_store is not None and user_openviking_store is not None:
             layered_total = int(user_openviking_store.stats().get("total", 0) or 0)
             if layered_total == 0 and len(getattr(user_store, "chunks", [])) > 0:
+                source_count = _count_vector_store_sources(user_store)
+                _chat_progress_update(
+                    chat_request_id,
+                    "preparing_index",
+                    meta={
+                        "index_sources": source_count,
+                        "index_mode": "fast_rebuild",
+                        "index_detail": f"首次建立索引（{source_count} 个来源）",
+                    },
+                )
                 auto_rebuild = _rebuild_openviking_from_vector_store(
                     user_openviking_store,
                     user_store,
                     reset=False,
+                    allow_llm=False,
                 )
                 openviking_trace["auto_rebuild"] = {
                     "sources": int(auto_rebuild.get("sources", 0) or 0),
+                    "mode": "fast_rebuild",
                     "stats": auto_rebuild.get("stats", {}),
                 }
 
@@ -3468,6 +3619,12 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
             uri = str(item.get("uri", "") or "")
             layer = str(item.get("layer", "L1"))
             source_key = str(item.get("source_key", "") or "").strip()
+            if not source_key and uri.startswith("viking://"):
+                source_key = _resolve_source_from_viking_uri(
+                    uri,
+                    user_id=auth_user_id,
+                    session_id=None if auth_user_id else session_id,
+                )
             source_doc = source_key or uri
             source_display = source_doc.removeprefix("session/").removeprefix("internal/")
             quote = _extract_verbatim_quote(
@@ -3578,6 +3735,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                     **_chat_timeout_kwargs(),
                 )
                 answer = _sanitize_model_disclosure(resp.choices[0].message.content or "暂无回复")
+                answer = _strip_evidence_citations(answer)
                 citation_warning = "本轮回答基于对话历史与病程时间线生成，未使用直接检索证据。"
             else:
                 # Truly no context at all — return the hard "证据不足" message

@@ -3768,6 +3768,7 @@
     const CHAT_PROGRESS_STEPS = [
       { key: "accepted", label: "已接收" },
       { key: "analyzing_question", label: "解析问题" },
+      { key: "preparing_index", label: "建立索引" },
       { key: "retrieving_evidence", label: "检索证据" },
       { key: "building_context", label: "组装证据" },
       { key: "generating_answer", label: "生成答案" },
@@ -3801,6 +3802,99 @@
     }
 
     let _msgIdCounter = 0;
+    const messageEvidenceState = new Map();
+
+    function normalizeHistoryEntry(entry) {
+      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+        const role = entry.role === "user" ? "user" : "assistant";
+        const meta = entry.meta && typeof entry.meta === "object" ? entry.meta : null;
+        return {
+          role,
+          content: String(entry.content || ""),
+          meta,
+        };
+      }
+      return {
+        role: "assistant",
+        content: String(entry || ""),
+        meta: null,
+      };
+    }
+
+    function buildAssistantMessageMeta(data) {
+      if (!data || typeof data !== "object") return null;
+      return {
+        sources: Array.isArray(data.sources) ? data.sources : [],
+        evidence_guard: data.evidence_guard || null,
+        citation_warning: String(data.citation_warning || ""),
+        key_conclusions: Array.isArray(data.key_conclusions) ? data.key_conclusions : [],
+        external_sources: Array.isArray(data.external_sources) ? data.external_sources : [],
+        literature_guard: data.literature_guard || null,
+        reasoning_mode: String(data.reasoning_mode || ""),
+        reasoning_meta: data.reasoning_meta || null,
+      };
+    }
+
+    function buildAssistantHistoryEntry(answer, data) {
+      return {
+        role: "assistant",
+        content: String(answer || ""),
+        meta: buildAssistantMessageMeta(data),
+      };
+    }
+
+    function getRequestHistoryPayload() {
+      return history.map((entry) => {
+        const normalized = normalizeHistoryEntry(entry);
+        return { role: normalized.role, content: normalized.content };
+      });
+    }
+
+    function rememberMessageEvidence(msgId, sources) {
+      const sourceByRank = new Map();
+      (Array.isArray(sources) ? sources : []).forEach((src) => {
+        const rank = Number(src?.rank || 0);
+        if (rank > 0 && !sourceByRank.has(rank)) {
+          sourceByRank.set(rank, src);
+        }
+      });
+      messageEvidenceState.set(String(msgId || ""), {
+        sourceByRank,
+      });
+    }
+
+    function sourcePreviewRefFromEvidence(sourceLike) {
+      const src = sourceLike && typeof sourceLike === "object" ? sourceLike : null;
+      if (!src) return null;
+      const sourceDoc = String(src.source_doc || src.source || "").trim();
+      if (!sourceDoc) return null;
+      const pageNum = Number(src.quote_page ?? src.page);
+      const page = Number.isFinite(pageNum) ? Math.max(0, Math.trunc(pageNum)) : 0;
+      return { sourceDoc, page };
+    }
+
+    function openSourcePreviewForCitation(msgId, rank) {
+      const state = messageEvidenceState.get(String(msgId || ""));
+      const src = state?.sourceByRank?.get(Number(rank || 0));
+      const previewRef = sourcePreviewRefFromEvidence(src);
+      if (!previewRef) {
+        renderSourcePlaceholder("当前这条回答缺少来源映射，无法直接打开预览。请刷新页面后重新生成回答，或重新上传该图片后再试。");
+        if (sourcePaneMeta) sourcePaneMeta.textContent = "来源映射缺失";
+        return false;
+      }
+      void openSourcePreview(previewRef.sourceDoc, previewRef.page);
+      return true;
+    }
+
+    function openSourcePreviewFromCitationLink(link) {
+      const el = link instanceof HTMLElement ? link : null;
+      if (!el) return false;
+      const sourceDoc = String(el.dataset.sourceDoc || "").trim();
+      if (!sourceDoc) return false;
+      const sourcePage = Number(el.dataset.sourcePage || 0);
+      void openSourcePreview(sourceDoc, sourcePage);
+      return true;
+    }
 
     function renderMarkdown(text) {
       if (!markdownParser) {
@@ -3930,6 +4024,70 @@
       sourcePaneBody.appendChild(empty);
     }
 
+    function buildSourceTextSection(title, text) {
+      const section = document.createElement("div");
+      section.className = "source-text-wrap";
+      const label = document.createElement("div");
+      label.className = "source-text-note";
+      label.textContent = title;
+      section.appendChild(label);
+      const body = document.createElement("pre");
+      body.className = "source-text";
+      body.textContent = String(text || "").trim() || "(空内容)";
+      section.appendChild(body);
+      return section;
+    }
+
+    async function openExtractedSourcePreview(source) {
+      if (!sourcePaneBody) return false;
+      const res = await fetch(`/api/upload/debug?source=${encodeURIComponent(source)}&preview_chars=4000`, {
+        headers: authHeaders(),
+        cache: "no-store",
+      });
+      let data = {};
+      try {
+        data = await res.json();
+      } catch (_err) {
+        data = {};
+      }
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+
+      const extractedPreview = String(data?.extraction?.text_preview || "").trim();
+      const chunkSamples = Array.isArray(data?.extraction?.chunk_samples) ? data.extraction.chunk_samples : [];
+      const chunkCount = Number(data?.extraction?.chunk_count || 0);
+      if (!extractedPreview && chunkSamples.length === 0) {
+        renderSourcePlaceholder("未找到已保存原件，且当前来源没有可展示的抽取文本。");
+        return true;
+      }
+
+      sourcePaneBody.innerHTML = "";
+      const wrap = document.createElement("div");
+      wrap.className = "source-frame-wrap";
+      wrap.appendChild(
+        buildSourceTextSection(
+          "当前未保存原始文件，以下为入库时抽取的文本证据预览。",
+          extractedPreview || chunkSamples.map((item) => String(item?.text_preview || "").trim()).filter(Boolean).join("\n\n")
+        )
+      );
+
+      if (chunkSamples.length > 0) {
+        const sampleText = chunkSamples
+          .slice(0, 3)
+          .map((item, idx) => {
+            const chars = Number(item?.chars || 0);
+            const preview = String(item?.text_preview || "").trim() || "(空片段)";
+            return `片段 ${idx + 1}${chars > 0 ? ` · ${chars} chars` : ""}\n${preview}`;
+          })
+          .join("\n\n");
+        wrap.appendChild(buildSourceTextSection(`命中来源分块样本（共 ${chunkCount} 个分块）`, sampleText));
+      }
+
+      sourcePaneBody.appendChild(wrap);
+      return true;
+    }
+
     async function openSourcePreview(sourceDoc, page = 0) {
       const source = String(sourceDoc || "").trim();
       const pageNum = Number.isFinite(Number(page)) ? Math.max(0, Math.trunc(Number(page))) : 0;
@@ -3959,17 +4117,23 @@
         });
         if (!res.ok) {
           let errText = `无法打开来源文件（HTTP ${res.status}）`;
+          let shouldFallbackToExtractedPreview = false;
           try {
             const data = await res.json();
             if (data?.error === "original_not_found") {
+              shouldFallbackToExtractedPreview = source.startsWith("session/");
               errText = data?.save_upload_originals
                 ? "来源文件不存在或已被清理。"
-                : "未保存原始文件，无法渲染原件。请开启 SAVE_UPLOAD_ORIGINALS 后重新上传。";
+                : "未保存原始文件，正在回退到抽取文本预览。";
             } else if (data?.error) {
               errText = `无法打开来源文件：${data.error}`;
             }
           } catch (_err) {
             // Ignore JSON parse errors and keep default message.
+          }
+          if (shouldFallbackToExtractedPreview) {
+            await openExtractedSourcePreview(source);
+            return;
           }
           renderSourcePlaceholder(errText);
           return;
@@ -4054,11 +4218,12 @@
 
     function openSourcePreviewFromEvidenceNode(node) {
       const el = node instanceof HTMLElement ? node : null;
-      if (!el) return;
+      if (!el) return false;
       const sourceDoc = String(el.dataset.sourceDoc || "").trim();
       const sourcePage = Number(el.dataset.sourcePage || 0);
-      if (!sourceDoc) return;
+      if (!sourceDoc) return false;
       void openSourcePreview(sourceDoc, sourcePage);
+      return true;
     }
 
     function renderMessage(role, text) {
@@ -4072,7 +4237,9 @@
         div.innerHTML = html;
         // Attach click handler for citation links
         div.addEventListener("click", (e) => {
-          const sourceToggle = e.target.closest(".cite-source-toggle");
+          const eventTarget = e.target instanceof Element ? e.target : e.target?.parentElement;
+          if (!(eventTarget instanceof Element)) return;
+          const sourceToggle = eventTarget.closest(".cite-source-toggle");
           if (sourceToggle) {
             e.preventDefault();
             const sourceWrap = sourceToggle.closest(".cite-source-inline");
@@ -4083,12 +4250,16 @@
             if (sourceDetail) sourceDetail.hidden = expanded;
             return;
           }
-          const link = e.target.closest(".cite-link");
+          const link = eventTarget.closest(".cite-link");
           if (!link) return;
           e.preventDefault();
+          if (link.dataset.citeType === "evidence" && openSourcePreviewFromCitationLink(link)) {
+            const targetId = link.getAttribute("href")?.replace("#", "");
+            const target = targetId ? document.getElementById(targetId) : null;
+            if (!target) return;
+          }
           const targetId = link.getAttribute("href")?.replace("#", "");
-          if (!targetId) return;
-          const target = document.getElementById(targetId);
+          const target = targetId ? document.getElementById(targetId) : null;
           if (target) {
             // Expand parent <details> if collapsed
             const parentDetails = target.closest("details");
@@ -4098,8 +4269,17 @@
             void target.offsetWidth; // force reflow
             target.classList.add("highlight");
             if (link.dataset.citeType === "evidence") {
-              openSourcePreviewFromEvidenceNode(target);
+              if (openSourcePreviewFromEvidenceNode(target)) return;
+              const citeMsgId = String(link.dataset.msgId || msgId || "");
+              const citeNum = Number(link.dataset.citeNum || 0);
+              openSourcePreviewForCitation(citeMsgId, citeNum);
             }
+            return;
+          }
+          if (link.dataset.citeType === "evidence") {
+            const citeMsgId = String(link.dataset.msgId || msgId || "");
+            const citeNum = Number(link.dataset.citeNum || 0);
+            openSourcePreviewForCitation(citeMsgId, citeNum);
           }
         });
       } else {
@@ -4160,6 +4340,8 @@
       let detail = "";
       if (step === "retrieving_evidence" && typeof meta.retrieval_detail === "string" && meta.retrieval_detail.trim()) {
         detail = meta.retrieval_detail.trim();
+      } else if (step === "preparing_index" && typeof meta.index_detail === "string" && meta.index_detail.trim()) {
+        detail = meta.index_detail.trim();
       } else if (step === "retrieving_evidence") {
         const idx = Number(meta.retrieval_store_index || 0);
         const total = Number(meta.retrieval_store_total || 0);
@@ -4417,6 +4599,21 @@
       const msgId = div.dataset.msgId || "0";
       const sourceList = Array.isArray(sources) ? sources : [];
       const sourceByRank = new Map(sourceList.map((s) => [Number(s.rank || 0), s]));
+      rememberMessageEvidence(msgId, sourceList);
+      if (sourceList.length === 0) {
+        div.querySelectorAll('.cite-link[data-cite-type="evidence"]').forEach((linkEl) => {
+          const text = document.createTextNode(linkEl.textContent || "");
+          linkEl.replaceWith(text);
+        });
+      }
+      div.querySelectorAll('.cite-link[data-cite-type="evidence"]').forEach((linkEl) => {
+        const rank = Number(linkEl.dataset.citeNum || 0);
+        const src = sourceByRank.get(rank);
+        const previewRef = sourcePreviewRefFromEvidence(src);
+        if (!previewRef) return;
+        linkEl.dataset.sourceDoc = previewRef.sourceDoc;
+        linkEl.dataset.sourcePage = String(previewRef.page);
+      });
       const usedRanks = new Set();
       const conclusions = Array.isArray(keyConclusions) ? keyConclusions : [];
       const external = Array.isArray(externalSources) ? externalSources : [];
@@ -4686,8 +4883,17 @@
       const parts = [];
       if (Number(stage.extract_text_ms) > 0) parts.push(`OCR=${fmtMs(stage.extract_text_ms)}`);
       if (Number(stage.timeline_ms) > 0) parts.push(`时间线=${fmtMs(stage.timeline_ms)}`);
-      if (Number(stage.openviking_ms) > 0) parts.push(`L1/L0=${fmtMs(stage.openviking_ms)}`);
+      if (item.openviking_pending) {
+        parts.push("L1/L0=后台处理中");
+      } else if (Number(stage.openviking_ms) > 0) {
+        parts.push(`L1/L0=${fmtMs(stage.openviking_ms)}`);
+      }
       return parts.length ? ` | 耗时=${total} (${parts.join(", ")})` : ` | 耗时=${total}`;
+    }
+
+    function formatOpenvikingStatus(item) {
+      if (item.openviking_pending) return "L1/L0=后台处理中";
+      return `L1=${item.openviking_l1 || 0} L0=${item.openviking_l0 || 0}`;
     }
 
     async function refreshTimeline() {
@@ -4787,7 +4993,7 @@
         const dateMsg = item.date_warning
           ? ` | 日期状态=未识别 (${item.date_warning})`
           : " | 日期状态=已识别";
-        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0} | L1=${item.openviking_l1 || 0} L0=${item.openviking_l0 || 0}${dateMsg}${formatUploadTiming(item)}`;
+        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0} | ${formatOpenvikingStatus(item)}${dateMsg}${formatUploadTiming(item)}`;
 
         // ── Redaction visualization card ──
         const redaction = item.redaction || {};
@@ -5013,7 +5219,7 @@
           }, 7000);
           const stageTimer4 = setTimeout(() => {
             renderProgressSteps("openviking");
-            progressFileStatus.textContent = "生成 L1/L0 分层记忆...";
+            progressFileStatus.textContent = "准备 L1/L0 分层记忆...";
           }, 9000);
 
           const res = await fetch("/api/upload", {
@@ -5031,7 +5237,10 @@
           completed++;
           setProgressPercent((completed / total) * 100);
           markAllStepsDone();
-          progressFileStatus.textContent = `✓ ${file.name} 处理完成`;
+          const openvikingPending = Array.isArray(data.results) && data.results.some((item) => item?.openviking_pending);
+          progressFileStatus.textContent = openvikingPending
+            ? `✓ ${file.name} 处理完成（L1/L0 后台处理中）`
+            : `✓ ${file.name} 处理完成`;
 
           (data.results || []).forEach((item) => renderFileResult(item));
           if (data.results?.some(r => !r.ok)) hasError = true;
@@ -5077,7 +5286,7 @@
         const dateMsg = item.date_detected
           ? ` | 日期=${item.timeline_date}(${item.timeline_date_source})`
           : " | 日期=未知";
-        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0} | L1=${item.openviking_l1 || 0} L0=${item.openviking_l0 || 0}${dateMsg}${formatUploadTiming(item)}`;
+        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0} | ${formatOpenvikingStatus(item)}${dateMsg}${formatUploadTiming(item)}`;
 
         // ── Redaction visualization card ──
         const redaction = item.redaction || {};
@@ -5293,7 +5502,7 @@
               "X-Chat-Request-Id": chatRequestId,
               ...authHeaders(),
             },
-            body: JSON.stringify({ message: text, history, response_style: currentResponseStyle }),
+            body: JSON.stringify({ message: text, history: getRequestHistoryPayload(), response_style: currentResponseStyle }),
           });
           let data = {};
           try {
@@ -5304,9 +5513,10 @@
           if (!res.ok) {
             throw new Error(data.detail || data.error || `HTTP ${res.status}`);
           }
-          const assistantDiv = renderMessage("assistant", data.answer || "出错了，请稍后重试。");
+          const answerText = data.answer || "出错了，请稍后重试。";
+          const assistantDiv = renderMessage("assistant", answerText);
           history.push({ role: "user", content: text });
-          history.push({ role: "assistant", content: data.answer || "" });
+          history.push(buildAssistantHistoryEntry(answerText, data));
           saveCurrentChatToSession();
           renderSessionList();
           attachRoundEvidence(
@@ -5485,7 +5695,21 @@
     // Restore chat history from session or show welcome
     if (history.length > 0) {
       for (let i = 0; i < history.length; i++) {
-        renderMessage(history[i].role, history[i].content);
+        const entry = normalizeHistoryEntry(history[i]);
+        const div = renderMessage(entry.role, entry.content);
+        if (entry.role === "assistant" && entry.meta) {
+          attachRoundEvidence(
+            div,
+            entry.meta.sources || [],
+            entry.meta.evidence_guard || null,
+            entry.meta.citation_warning || "",
+            entry.meta.key_conclusions || [],
+            entry.meta.external_sources || [],
+            entry.meta.literature_guard || null,
+            entry.meta.reasoning_mode || "",
+            entry.meta.reasoning_meta || null,
+          );
+        }
       }
     } else {
       renderMessage("assistant", "你好，我会优先参考内部医学指南，再结合你上传的病例进行带证据回答。\n\n请先上传病例文件，然后提问。");
