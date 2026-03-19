@@ -577,6 +577,18 @@ def _original_file_path_for_source(
     return None
 
 
+def _preview_meta_path_for_source(
+    source: str,
+    *,
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> Path | None:
+    base = _original_file_path_for_source(source, user_id=user_id, session_id=session_id)
+    if base is None:
+        return None
+    return base.with_name(f"{base.name}.preview.json")
+
+
 def _masked_upload_source_name(source: str) -> str:
     normalized = _normalize_upload_source(source)
     stem, _dot, _suffix = normalized.rpartition(".")
@@ -619,6 +631,59 @@ def _delete_upload_original(
 ) -> bool:
     target_path = _original_file_path_for_source(source, user_id=user_id, session_id=session_id)
     if target_path is None or not target_path.exists() or not target_path.is_file():
+        return False
+    try:
+        target_path.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _save_upload_preview_meta(
+    source: str,
+    meta: dict[str, Any],
+    *,
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> bool:
+    target_path = _preview_meta_path_for_source(source, user_id=user_id, session_id=session_id)
+    if target_path is None:
+        return False
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(
+            json.dumps(meta, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _load_upload_preview_meta(
+    source: str,
+    *,
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    target_path = _preview_meta_path_for_source(source, user_id=user_id, session_id=session_id)
+    if target_path is None or not target_path.exists() or not target_path.is_file():
+        return {}
+    try:
+        data = json.loads(target_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _delete_upload_preview_meta(
+    source: str,
+    *,
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> bool:
+    target_path = _preview_meta_path_for_source(source, user_id=user_id, session_id=session_id)
+    if target_path is None or not target_path.exists():
         return False
     try:
         target_path.unlink()
@@ -2816,6 +2881,7 @@ def user_delete_upload(request: Request, source: str = "") -> JSONResponse:
     removed_layers = layered_store.remove_source(full_source)
     removed_original = _delete_upload_original(full_source, user_id=user_id)
     removed_masked_original = _delete_upload_original(_masked_upload_source_name(full_source), user_id=user_id)
+    removed_preview_meta = _delete_upload_preview_meta(full_source, user_id=user_id)
     return JSONResponse({
         "ok": True,
         "removed_chunks": removed_chunks,
@@ -2823,6 +2889,7 @@ def user_delete_upload(request: Request, source: str = "") -> JSONResponse:
         "removed_openviking_layers": removed_layers,
         "removed_original_file": removed_original,
         "removed_masked_original_file": removed_masked_original,
+        "removed_preview_meta_file": removed_preview_meta,
         "remaining_chunks": len(store.chunks),
         "remaining_events": len(events),
         "remaining_openviking_layers": layered_store.stats().get("total", 0),
@@ -2890,8 +2957,14 @@ async def upload(
                 redaction_preview = extract_redaction_preview(text)
             stage_ms["deid_ms"] = round(_ms(stage_t0), 2)
             stage_t0 = time.perf_counter()
+            image_privacy_cleared = False
             if is_image and ENABLE_UPLOAD_DEID:
                 image_redaction = _build_image_redaction_result(file_bytes, mime_type=input_mime)
+                image_has_sensitive_boxes = int(image_redaction.get("sensitive_box_count", 0) or 0) > 0
+                image_privacy_cleared = (
+                    not image_has_sensitive_boxes
+                    and str(image_redaction.get("reason", "") or "") == "no_sensitive_boxes"
+                )
             stage_ms["image_redaction_ms"] = round(_ms(stage_t0), 2)
             if SAVE_UPLOAD_ORIGINALS:
                 if not is_image:
@@ -2902,12 +2975,6 @@ async def upload(
                         session_id=None if auth_user_id else session_id,
                     )
                 else:
-                    image_has_sensitive_boxes = int(image_redaction.get("sensitive_box_count", 0) or 0) > 0
-                    image_privacy_cleared = (
-                        ENABLE_UPLOAD_DEID
-                        and not image_has_sensitive_boxes
-                        and str(image_redaction.get("reason", "") or "") == "no_sensitive_boxes"
-                    )
                     if image_privacy_cleared:
                         original_file = _save_upload_original(
                             source_key,
@@ -2915,6 +2982,14 @@ async def upload(
                             user_id=auth_user_id,
                             session_id=None if auth_user_id else session_id,
                         )
+            elif is_image and image_privacy_cleared:
+                # Keep privacy-cleared images available for source preview even when raw-original storage is off.
+                original_file = _save_upload_original(
+                    source_key,
+                    file_bytes,
+                    user_id=auth_user_id,
+                    session_id=None if auth_user_id else session_id,
+                )
             # Save masked image for source preview even when raw originals are disabled.
             if (
                 is_image
@@ -2933,6 +3008,24 @@ async def upload(
                     )
                 except Exception:
                     pass  # best-effort; do not block upload on masking save failure
+            if is_image:
+                preview_mode = ""
+                preview_reason = str(image_redaction.get("reason", "") or "")
+                if image_redaction.get("available") and image_redaction.get("masked_data_url"):
+                    preview_mode = "masked"
+                elif image_privacy_cleared:
+                    preview_mode = "original_safe"
+                if preview_mode:
+                    _save_upload_preview_meta(
+                        source_key,
+                        {
+                            "mode": preview_mode,
+                            "reason": preview_reason,
+                            "mime_type": input_mime,
+                        },
+                        user_id=auth_user_id,
+                        session_id=None if auth_user_id else session_id,
+                    )
             stage_t0 = time.perf_counter()
             chunks = split_text(text)
             stage_ms["split_ms"] = round(_ms(stage_t0), 2)
@@ -3284,6 +3377,19 @@ def source_original(request: Request, source: str = "") -> Response:
     }
     # For image files, prefer the masked (redacted) version if available
     if media_type.startswith("image/"):
+        preview_meta = _load_upload_preview_meta(
+            source_key,
+            user_id=auth_user_id,
+            session_id=None if auth_user_id else session_id,
+        )
+        preview_mode = str(preview_meta.get("mode", "") or "").strip().lower()
+        if preview_mode == "original_safe":
+            return FileResponse(
+                file_path,
+                media_type=media_type,
+                filename=file_path.name,
+                headers=headers,
+            )
         masked_path, _ = _resolve_original_file_for_source(
             _masked_upload_source_name(source_key),
             user_id=auth_user_id,
@@ -3303,6 +3409,16 @@ def source_original(request: Request, source: str = "") -> Response:
                 served_redacted = True
                 media_type = "image/jpeg"
                 headers["X-Source-Redacted"] = "1"
+                _save_upload_preview_meta(
+                    source_key,
+                    {
+                        "mode": "masked",
+                        "reason": str(image_redaction.get("reason", "") or ""),
+                        "mime_type": media_type,
+                    },
+                    user_id=auth_user_id,
+                    session_id=None if auth_user_id else session_id,
+                )
                 # Backfill masked original so existing uploads also become safe in preview.
                 if SAVE_UPLOAD_ORIGINALS:
                     try:
@@ -3315,6 +3431,17 @@ def source_original(request: Request, source: str = "") -> Response:
                     except Exception:
                         pass
                 return Response(content=masked_bytes, media_type=media_type, headers=headers)
+            if str(image_redaction.get("reason", "") or "") == "no_sensitive_boxes":
+                _save_upload_preview_meta(
+                    source_key,
+                    {
+                        "mode": "original_safe",
+                        "reason": "no_sensitive_boxes",
+                        "mime_type": media_type,
+                    },
+                    user_id=auth_user_id,
+                    session_id=None if auth_user_id else session_id,
+                )
     headers["X-Source-Redacted"] = "1" if served_redacted else "0"
     return FileResponse(
         file_path,
