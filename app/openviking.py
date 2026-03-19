@@ -466,12 +466,14 @@ class OpenVikingStore:
         l1_items: list[dict[str, Any]],
         embed_fn: Callable[[str], list[float]],
         l2_texts: list[str] | None = None,
+        *,
+        use_native: bool = True,
     ) -> dict[str, int]:
         dual_write_legacy = _env_flag("OPENVIKING_LEGACY_DUAL_WRITE", "false")
         legacy_stats = {"l0": 0, "l1": 0}
         if dual_write_legacy:
             legacy_stats = self._upsert_source_layers_legacy(source, l0_text, l1_items, embed_fn)
-        if self._native_client is None:
+        if not use_native or self._native_client is None:
             if not dual_write_legacy:
                 return self._upsert_source_layers_legacy(source, l0_text, l1_items, embed_fn)
             return legacy_stats

@@ -176,7 +176,7 @@ REQUIRE_LOGIN = os.getenv("REQUIRE_LOGIN", "false").strip().lower() in {"1", "tr
 if INVITE_CODE:
     REQUIRE_LOGIN = True
 
-app = FastAPI(title="“肠”治久安")
+app = FastAPI(title="长智久安")
 client = build_client()
 internal_openviking_store = OpenVikingStore(INTERNAL_OPENVIKING_DB, namespace="internal-guidelines")
 audit_logger = AuditLogger(AUDIT_LOG_PATH)
@@ -1143,6 +1143,7 @@ def _upsert_openviking_layers(
     chunks: list[Any],
     *,
     allow_llm: bool = True,
+    use_native: bool = True,
 ) -> dict[str, int]:
     if not OPENVIKING_ENABLED:
         return {"l0": 0, "l1": 0}
@@ -1154,6 +1155,7 @@ def _upsert_openviking_layers(
         l1_items=l1_items,
         embed_fn=_global_embed,
         l2_texts=[x for x in l2_texts if x],
+        use_native=use_native,
     )
 
 
@@ -1328,6 +1330,8 @@ def _rebuild_openviking_from_vector_store(
     reset: bool = True,
     *,
     allow_llm: bool = True,
+    use_native: bool = True,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if vector_store is None:
         return {"sources": 0, "rebuilt": [], "stats": layered_store.stats()}
@@ -1344,9 +1348,27 @@ def _rebuild_openviking_from_vector_store(
     if reset:
         layered_store.clear()
     rebuilt: list[dict[str, Any]] = []
-    for src in sorted(source_map.keys()):
+    sources = sorted(source_map.keys())
+    total_sources = len(sources)
+    for idx, src in enumerate(sources, start=1):
         chunks = source_map[src]
-        stats = _upsert_openviking_layers(layered_store, src, chunks, allow_llm=allow_llm)
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "index_sources": total_sources,
+                    "index_source_index": idx,
+                    "index_source": src,
+                    "index_mode": "fast_rebuild" if not use_native else "rebuild",
+                    "index_detail": f"正在建立索引（{idx}/{total_sources}）：{src}",
+                }
+            )
+        stats = _upsert_openviking_layers(
+            layered_store,
+            src,
+            chunks,
+            allow_llm=allow_llm,
+            use_native=use_native,
+        )
         rebuilt.append(
             {
                 "source": src,
@@ -3570,6 +3592,8 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                     user_store,
                     reset=False,
                     allow_llm=False,
+                    use_native=False,
+                    progress_cb=lambda meta: _chat_progress_update(chat_request_id, "preparing_index", meta=meta),
                 )
                 openviking_trace["auto_rebuild"] = {
                     "sources": int(auto_rebuild.get("sources", 0) or 0),
