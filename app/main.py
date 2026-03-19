@@ -1743,15 +1743,17 @@ def _build_image_redaction_result(file_bytes: bytes, mime_type: str) -> dict[str
     words: list[dict[str, Any]] = []
     engine = "none"
     ocr_error = ""
+    paddle_error = ""
     if is_paddle_available():
         try:
             detailed = ocr_with_paddle_bytes_detailed(file_bytes, lang=PADDLE_OCR_LANG)
             words = detailed.get("words", []) if isinstance(detailed, dict) else []
             engine = "paddle"
         except Exception as exc:
-            ocr_error = f"ocr_failed:{exc}"
+            paddle_error = f"ocr_failed:{exc}"
             engine = "paddle"
-    elif OCR_PROVIDER in {"auto", "aliyun"}:
+
+    if not words and OCR_PROVIDER in {"auto", "aliyun"}:
         try:
             client = build_client()
             detailed = ocr_with_aliyun_ocr_bytes_detailed(
@@ -1769,8 +1771,9 @@ def _build_image_redaction_result(file_bytes: bytes, mime_type: str) -> dict[str
         except Exception as exc:
             ocr_error = f"ocr_failed:{exc}"
             engine = "aliyun"
-    else:
-        ocr_error = "paddle_unavailable"
+
+    if not words and not ocr_error:
+        ocr_error = paddle_error or "paddle_unavailable"
 
     if not words:
         return {
