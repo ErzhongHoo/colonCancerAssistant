@@ -150,11 +150,22 @@ pip install -r requirements.txt
 如需启用 PaddleOCR 本地识别：
 
 ```bash
+# Debian/Ubuntu 服务器建议先安装系统依赖
+sudo apt install -y libgl1 libglib2.0-0 libsm6 libxext6 libxrender1
+
 # 使用 uv
 uv pip install --python .venv/bin/python paddlepaddle
 
 # 或使用 pip
 pip install paddlepaddle
+```
+
+`requirements.txt` 只会安装 `paddleocr` 包；`paddlepaddle` 需要手动安装，否则本地 OCR 和图片脱敏打码预览可能无法正常工作。
+
+安装完成后，建议用下面的命令验证 PaddleOCR 是否可正常初始化：
+
+```bash
+python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='ch', use_textline_orientation=True); print('ok')"
 ```
 
 > **提示**：如不安装 PaddleOCR，系统会自动回退到阿里云在线 OCR 或视觉模型 OCR。
@@ -336,7 +347,8 @@ http://127.0.0.1:8000
 1. ✅ `.env` 中填入了有效的 `DASHSCOPE_API_KEY`
 2. ✅ `.env` 中设置了 `JWT_SECRET`（生产环境）
 3. ✅ 依赖已安装（`requirements.txt` 中的所有包）
-4. ✅ `data/` 目录可写（应用会在此目录自动创建数据库和索引文件）
+4. ✅ 如需本地 PaddleOCR，已手动安装 `paddlepaddle`，并在 Debian/Ubuntu 上执行过 `sudo apt install -y libgl1 libglib2.0-0 libsm6 libxext6 libxrender1`
+5. ✅ `data/` 目录可写（应用会在此目录自动创建数据库和索引文件）
 
 ---
 
