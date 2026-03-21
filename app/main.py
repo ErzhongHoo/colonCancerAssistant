@@ -3177,6 +3177,7 @@ async def upload(
             results.append(
                 {
                     "file": file_name,
+                    "source": source_key,
                     "chunks": added,
                     "ok": True,
                     "redaction": redaction,

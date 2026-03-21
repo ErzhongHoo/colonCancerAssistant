@@ -2528,6 +2528,35 @@
       font-size: 13px;
     }
 
+    .source-item-name {
+      flex: 1;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .source-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .view-source-btn {
+      background: #e8f0fe;
+      border: 1px solid #d2e3fc;
+      color: #1a73e8;
+      border-radius: 6px;
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+
+    .view-source-btn:hover {
+      background: #dbe9fd;
+    }
+
     .modal-box .source-list li .del-src-btn {
       background: transparent;
       border: 1px solid #fecaca;
@@ -2541,6 +2570,23 @@
 
     .modal-box .source-list li .del-src-btn:hover {
       background: #fef2f2;
+    }
+
+    .upload-preview-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 10px 0 4px;
+    }
+
+    .upload-preview-hint {
+      font-size: 12px;
+      color: #6b7280;
+    }
+
+    .clickable-preview {
+      cursor: zoom-in;
     }
 
     .modal-box .account-username-card {
@@ -3641,15 +3687,48 @@
         usernameMsg.textContent = '';
         usernameMsg.className = 'account-form-msg';
         const sources = stats.upload_sources || [];
+        const accountSourcesEl = document.getElementById('account-sources');
+        accountSourcesEl.innerHTML = '';
         if (sources.length > 0) {
-          let html = '<h3 style="font-size:14px;margin:16px 0 8px;font-weight:600">\u5df2\u4e0a\u4f20\u6587\u4ef6</h3><ul class="source-list">';
+          const title = document.createElement('h3');
+          title.style.fontSize = '14px';
+          title.style.margin = '16px 0 8px';
+          title.style.fontWeight = '600';
+          title.textContent = '\u5df2\u4e0a\u4f20\u6587\u4ef6';
+          accountSourcesEl.appendChild(title);
+
+          const ul = document.createElement('ul');
+          ul.className = 'source-list';
+          accountSourcesEl.appendChild(ul);
+
           for (const src of sources) {
-            html += `<li><span>${src}</span><button class="del-src-btn" data-source="${src}">\u5220\u9664</button></li>`;
-          }
-          html += '</ul>';
-          document.getElementById('account-sources').innerHTML = html;
-          document.querySelectorAll('.del-src-btn').forEach(btn => {
-            btn.onclick = async () => {
+            const li = document.createElement('li');
+
+            const name = document.createElement('span');
+            name.className = 'source-item-name';
+            name.textContent = src;
+            li.appendChild(name);
+
+            const actions = document.createElement('div');
+            actions.className = 'source-actions';
+
+            const viewBtn = document.createElement('button');
+            viewBtn.type = 'button';
+            viewBtn.className = 'view-source-btn';
+            viewBtn.textContent = sourceKindFromName(src) === 'image' ? '\u67e5\u770b\u56fe\u7247' : '\u67e5\u770b';
+            viewBtn.onclick = () => {
+              modal.classList.add('hidden');
+              void openSourcePreview(src, 0);
+            };
+            actions.appendChild(viewBtn);
+
+            const delBtn = document.createElement('button');
+            delBtn.type = 'button';
+            delBtn.className = 'del-src-btn';
+            delBtn.dataset.source = src;
+            delBtn.textContent = '\u5220\u9664';
+            delBtn.onclick = async () => {
+              const btn = delBtn;
               if (!confirm('\u786e\u5b9a\u5220\u9664\u8be5\u6587\u4ef6\u7684\u6240\u6709\u6570\u636e\uff1f')) return;
               btn.disabled = true;
               btn.textContent = '...';
@@ -3670,9 +3749,13 @@
                 btn.textContent = '删除';
               }
             };
-          });
+            actions.appendChild(delBtn);
+
+            li.appendChild(actions);
+            ul.appendChild(li);
+          }
         } else {
-          document.getElementById('account-sources').innerHTML = '<div class="muted" style="margin-top:12px">\u6682\u65e0\u5df2\u4e0a\u4f20\u6587\u4ef6</div>';
+          accountSourcesEl.innerHTML = '<div class="muted" style="margin-top:12px">\u6682\u65e0\u5df2\u4e0a\u4f20\u6587\u4ef6</div>';
         }
       } catch (_err) {
         alert('加载账户信息失败，请检查网络或服务器配置');
@@ -4145,6 +4228,19 @@
       }
 
       sourcePaneBody.appendChild(wrap);
+      return true;
+    }
+
+    function sourceKeyFromUploadItem(item) {
+      const payload = item && typeof item === "object" ? item : null;
+      if (!payload) return "";
+      return normalizePreviewSourceKey(payload.source || payload.source_key || payload.file || "");
+    }
+
+    function openUploadItemSourcePreview(item) {
+      const source = sourceKeyFromUploadItem(item);
+      if (!source) return false;
+      void openSourcePreview(source, 0);
       return true;
     }
 
@@ -5062,6 +5158,8 @@
         const preview = Array.isArray(item.redaction_preview) ? item.redaction_preview : [];
         const imageRedaction = item.image_redaction || {};
         const hasImageRedaction = imageRedaction.available || imageRedaction.reason === "no_sensitive_boxes" || imageRedaction.reason === "ocr_failed";
+        const sourceKey = sourceKeyFromUploadItem(item);
+        const isImageSource = sourceKindFromName(item.file) === "image";
 
         if (totalRedacted > 0 || preview.length || hasImageRedaction) {
           const card = document.createElement("div");
@@ -5379,6 +5477,27 @@
           title.textContent = totalRedacted > 0 ? `🛡️ 已脱敏 ${totalRedacted} 处敏感信息` : "🛡️ 隐私脱敏扫描完成";
           card.appendChild(title);
 
+          if (sourceKey && isImageSource) {
+            const actionRow = document.createElement("div");
+            actionRow.className = "upload-preview-actions";
+            const viewBtn = document.createElement("button");
+            viewBtn.type = "button";
+            viewBtn.className = "view-source-btn";
+            viewBtn.textContent = "查看图片";
+            viewBtn.addEventListener("click", () => {
+              openUploadItemSourcePreview(item);
+            });
+            actionRow.appendChild(viewBtn);
+
+            const hint = document.createElement("span");
+            hint.className = "upload-preview-hint";
+            hint.textContent = imageRedaction.masked_data_url
+              ? "打开后展示脱敏图"
+              : "打开后展示原始图片";
+            actionRow.appendChild(hint);
+            card.appendChild(actionRow);
+          }
+
           // Stats bar
           const REDACT_LABELS = {
             id_card: "身份证", phone: "手机号", email: "邮箱",
@@ -5430,6 +5549,14 @@
               imgWrap.appendChild(badge);
             }
             card.appendChild(imgWrap);
+            if (sourceKey) {
+              imgWrap.classList.add("clickable-preview");
+              imgWrap.title = "点击查看完整图片";
+              maskedImg.title = "点击查看完整图片";
+              imgWrap.addEventListener("click", () => {
+                openUploadItemSourcePreview(item);
+              });
+            }
 
             // Build original image data URL from upload for toggle
             let originalDataUrl = null;
