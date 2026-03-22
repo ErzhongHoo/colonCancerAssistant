@@ -204,6 +204,36 @@
       background: #fff;
     }
 
+    .source-image.clickable-preview {
+      cursor: zoom-in;
+    }
+
+    .source-image-actions {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .source-image-expand-btn {
+      border: 0;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.78);
+      color: #fff;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .source-image-expand-btn:hover {
+      background: rgba(15, 23, 42, 0.9);
+    }
+
     .source-text-wrap {
       width: 100%;
       height: 100%;
@@ -2439,6 +2469,8 @@
     .guest-panel {
       display: flex;
       align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
       gap: 10px;
       padding: 10px 14px;
       background: #fffbe6;
@@ -2449,11 +2481,26 @@
       color: #92400e;
     }
 
+    .guest-panel-main {
+      flex: 1 1 180px;
+      min-width: 0;
+      line-height: 1.5;
+    }
+
+    .guest-panel-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+
     .guest-panel a {
       color: var(--primary);
       cursor: pointer;
       text-decoration: none;
       font-weight: 500;
+      white-space: nowrap;
     }
 
     /* ── Account Modal ────────────────────────────── */
@@ -2587,6 +2634,143 @@
 
     .clickable-preview {
       cursor: zoom-in;
+    }
+
+    body.image-viewer-open {
+      overflow: hidden;
+    }
+
+    .image-viewer-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 11000;
+      display: flex;
+      flex-direction: column;
+      background: rgba(2, 6, 23, 0.92);
+      padding: 20px;
+      gap: 12px;
+    }
+
+    .image-viewer-overlay.hidden {
+      display: none;
+    }
+
+    .image-viewer-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: #e5eefc;
+      min-width: 0;
+    }
+
+    .image-viewer-meta {
+      min-width: 0;
+      font-size: 13px;
+      line-height: 1.5;
+      color: rgba(226, 232, 240, 0.9);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .image-viewer-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    .image-viewer-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .image-viewer-control-btn {
+      min-width: 36px;
+      height: 36px;
+      border: 0;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+      color: #fff;
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+      transition: background 0.2s;
+      padding: 0 12px;
+    }
+
+    .image-viewer-control-btn:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    .image-viewer-zoom-label {
+      min-width: 58px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: rgba(226, 232, 240, 0.95);
+    }
+
+    .image-viewer-close {
+      width: 42px;
+      height: 42px;
+      border: 0;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+      color: #fff;
+      font-size: 30px;
+      line-height: 1;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+
+    .image-viewer-close:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    .image-viewer-body {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 4px;
+    }
+
+    .image-viewer-stage {
+      min-width: 100%;
+      min-height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      box-sizing: border-box;
+    }
+
+    .image-viewer-image {
+      display: block;
+      max-width: none;
+      max-height: none;
+      border-radius: 12px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+      background: #fff;
+      cursor: grab;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+
+    .image-viewer-image.dragging {
+      cursor: grabbing;
+    }
+
+    .image-viewer-tip {
+      text-align: center;
+      font-size: 12px;
+      color: rgba(226, 232, 240, 0.72);
     }
 
     .modal-box .account-username-card {
@@ -3191,6 +3375,27 @@
     </aside>
   </div>
 
+  <div id="image-viewer-overlay" class="image-viewer-overlay hidden">
+    <div class="image-viewer-head">
+      <div id="image-viewer-meta" class="image-viewer-meta">图片预览</div>
+      <div class="image-viewer-toolbar">
+        <div class="image-viewer-controls">
+          <button id="image-viewer-zoom-out" class="image-viewer-control-btn" type="button" aria-label="缩小图片">−</button>
+          <button id="image-viewer-zoom-reset" class="image-viewer-control-btn" type="button" aria-label="重置缩放">100%</button>
+          <button id="image-viewer-zoom-in" class="image-viewer-control-btn" type="button" aria-label="放大图片">+</button>
+          <span id="image-viewer-zoom-label" class="image-viewer-zoom-label">100%</span>
+        </div>
+        <button id="image-viewer-close" class="image-viewer-close" type="button" aria-label="关闭图片预览">×</button>
+      </div>
+    </div>
+    <div id="image-viewer-body" class="image-viewer-body">
+      <div id="image-viewer-stage" class="image-viewer-stage">
+        <img id="image-viewer-image" class="image-viewer-image" alt="图片预览" />
+      </div>
+    </div>
+    <div class="image-viewer-tip">滚轮或按钮可缩放；点击非图片区域、右上角关闭按钮，或按 Esc 退出</div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
   <script>
@@ -3624,8 +3829,8 @@
       } else {
         container.innerHTML = `
           <div class="guest-panel">
-            <span>\u26a0 \u8bbf\u5ba2\u6a21\u5f0f\uff1a\u6570\u636e\u4e0d\u6301\u4e45\u5316\uff0c\u5237\u65b0\u540e\u4e22\u5931\u3002</span>
-            <span style="display:flex;gap:6px;align-items:center;margin-left:auto">
+            <span class="guest-panel-main">\u26a0 \u8bbf\u5ba2\u6a21\u5f0f\uff1a\u6570\u636e\u4e0d\u6301\u4e45\u5316\uff0c\u5237\u65b0\u540e\u4e22\u5931\u3002</span>
+            <span class="guest-panel-actions">
               <button id="open-settings-btn-guest" class="settings-gear-btn" title="\u8bbe\u7f6e" style="color:#92400e">\u2699\uFE0F</button>
               <a id="guest-login-link">\u767b\u5f55/\u6ce8\u518c</a>
             </span>
@@ -3872,6 +4077,109 @@
     const thinkingStepTags = document.getElementById("thinking-step-tags");
     const sourcePaneBody = document.getElementById("source-pane-body");
     const sourcePaneMeta = document.getElementById("source-pane-meta");
+    const imageViewerOverlay = document.getElementById("image-viewer-overlay");
+    const imageViewerMeta = document.getElementById("image-viewer-meta");
+    const imageViewerBody = document.getElementById("image-viewer-body");
+    const imageViewerStage = document.getElementById("image-viewer-stage");
+    const imageViewerImage = document.getElementById("image-viewer-image");
+    const imageViewerZoomOutBtn = document.getElementById("image-viewer-zoom-out");
+    const imageViewerZoomResetBtn = document.getElementById("image-viewer-zoom-reset");
+    const imageViewerZoomInBtn = document.getElementById("image-viewer-zoom-in");
+    const imageViewerZoomLabel = document.getElementById("image-viewer-zoom-label");
+    const imageViewerCloseBtn = document.getElementById("image-viewer-close");
+
+    if (imageViewerCloseBtn) {
+      imageViewerCloseBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeImageViewer();
+      });
+    }
+    if (imageViewerZoomOutBtn) {
+      imageViewerZoomOutBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setImageViewerZoom(imageViewerZoom - 0.25);
+      });
+    }
+    if (imageViewerZoomResetBtn) {
+      imageViewerZoomResetBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setImageViewerZoom(1);
+      });
+    }
+    if (imageViewerZoomInBtn) {
+      imageViewerZoomInBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setImageViewerZoom(imageViewerZoom + 0.25);
+      });
+    }
+    if (imageViewerBody) {
+      imageViewerBody.addEventListener("wheel", (e) => {
+        if (!imageViewerOverlay || imageViewerOverlay.classList.contains("hidden")) return;
+        e.preventDefault();
+        const delta = e.deltaY < 0 ? 0.25 : -0.25;
+        setImageViewerZoom(imageViewerZoom + delta);
+      }, { passive: false });
+    }
+    if (imageViewerImage) {
+      imageViewerImage.addEventListener("mousedown", (e) => {
+        if (e.button !== 0 || !imageViewerBody) return;
+        imageViewerDragActive = true;
+        imageViewerDragMoved = false;
+        imageViewerDragStartX = e.clientX;
+        imageViewerDragStartY = e.clientY;
+        imageViewerDragStartScrollLeft = imageViewerBody.scrollLeft;
+        imageViewerDragStartScrollTop = imageViewerBody.scrollTop;
+        imageViewerImage.classList.add("dragging");
+        e.preventDefault();
+      });
+      imageViewerImage.addEventListener("dragstart", (e) => {
+        e.preventDefault();
+      });
+    }
+    document.addEventListener("mousemove", (e) => {
+      if (!imageViewerDragActive || !imageViewerBody) return;
+      const deltaX = e.clientX - imageViewerDragStartX;
+      const deltaY = e.clientY - imageViewerDragStartY;
+      if (!imageViewerDragMoved && (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3)) {
+        imageViewerDragMoved = true;
+      }
+      imageViewerBody.scrollLeft = imageViewerDragStartScrollLeft - deltaX;
+      imageViewerBody.scrollTop = imageViewerDragStartScrollTop - deltaY;
+    });
+    document.addEventListener("mouseup", () => {
+      if (!imageViewerDragActive) return;
+      imageViewerDragActive = false;
+      if (imageViewerImage) {
+        imageViewerImage.classList.remove("dragging");
+      }
+      if (imageViewerDragMoved) {
+        imageViewerSuppressCloseClick = true;
+        window.setTimeout(() => {
+          imageViewerSuppressCloseClick = false;
+        }, 0);
+      }
+    });
+    if (imageViewerOverlay) {
+      imageViewerOverlay.addEventListener("click", (e) => {
+        if (imageViewerSuppressCloseClick) return;
+        const target = e.target instanceof Element ? e.target : null;
+        if (target === imageViewerImage) return;
+        if (target && target.closest(".image-viewer-controls")) return;
+        if (target && target.closest(".image-viewer-close")) return;
+        closeImageViewer();
+      });
+    }
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && imageViewerOverlay && !imageViewerOverlay.classList.contains("hidden")) {
+        e.preventDefault();
+        closeImageViewer();
+      }
+    });
+    window.addEventListener("resize", () => {
+      if (imageViewerOverlay && !imageViewerOverlay.classList.contains("hidden")) {
+        recalcImageViewerFitScale();
+      }
+    });
 
 
     const sendBtn = document.getElementById("send-btn");
@@ -3888,6 +4196,18 @@
     let sourcePreviewKey = "";
     let sourcePreviewMime = "";
     let sourcePreviewRedacted = false;
+    let imageViewerSourceUrl = "";
+    let imageViewerZoom = 1;
+    let imageViewerFitScale = 1;
+    let imageViewerNaturalWidth = 0;
+    let imageViewerNaturalHeight = 0;
+    let imageViewerDragActive = false;
+    let imageViewerDragMoved = false;
+    let imageViewerDragStartX = 0;
+    let imageViewerDragStartY = 0;
+    let imageViewerDragStartScrollLeft = 0;
+    let imageViewerDragStartScrollTop = 0;
+    let imageViewerSuppressCloseClick = false;
 
     const CHAT_PROGRESS_STEPS = [
       { key: "accepted", label: "已接收" },
@@ -4149,6 +4469,9 @@
     }
 
     function cleanupSourcePreviewBlob() {
+      if (sourcePreviewBlobUrl && imageViewerSourceUrl === sourcePreviewBlobUrl) {
+        closeImageViewer();
+      }
       if (sourcePreviewBlobUrl) {
         URL.revokeObjectURL(sourcePreviewBlobUrl);
         sourcePreviewBlobUrl = "";
@@ -4179,6 +4502,110 @@
       body.textContent = String(text || "").trim() || "(空内容)";
       section.appendChild(body);
       return section;
+    }
+
+    function updateImageViewerZoomLabel() {
+      if (!imageViewerZoomLabel) return;
+      imageViewerZoomLabel.textContent = `${Math.round(imageViewerZoom * 100)}%`;
+    }
+
+    function applyImageViewerZoom() {
+      if (!imageViewerImage) return;
+      if (imageViewerNaturalWidth <= 0 || imageViewerNaturalHeight <= 0) {
+        imageViewerImage.style.removeProperty("width");
+        imageViewerImage.style.removeProperty("height");
+        updateImageViewerZoomLabel();
+        return;
+      }
+      const scale = imageViewerFitScale * imageViewerZoom;
+      const width = Math.max(1, Math.round(imageViewerNaturalWidth * scale));
+      const height = Math.max(1, Math.round(imageViewerNaturalHeight * scale));
+      imageViewerImage.style.width = `${width}px`;
+      imageViewerImage.style.height = `${height}px`;
+      updateImageViewerZoomLabel();
+    }
+
+    function recalcImageViewerFitScale() {
+      if (!imageViewerBody || !imageViewerImage) return;
+      imageViewerNaturalWidth = Number(imageViewerImage.naturalWidth || 0);
+      imageViewerNaturalHeight = Number(imageViewerImage.naturalHeight || 0);
+      if (imageViewerNaturalWidth <= 0 || imageViewerNaturalHeight <= 0) {
+        imageViewerFitScale = 1;
+        applyImageViewerZoom();
+        return;
+      }
+      const viewWidth = Math.max(1, imageViewerBody.clientWidth - 32);
+      const viewHeight = Math.max(1, imageViewerBody.clientHeight - 32);
+      imageViewerFitScale = Math.min(viewWidth / imageViewerNaturalWidth, viewHeight / imageViewerNaturalHeight, 1);
+      if (!Number.isFinite(imageViewerFitScale) || imageViewerFitScale <= 0) {
+        imageViewerFitScale = 1;
+      }
+      applyImageViewerZoom();
+    }
+
+    function setImageViewerZoom(nextZoom) {
+      const normalized = Math.min(6, Math.max(1, Number(nextZoom) || 1));
+      imageViewerZoom = normalized;
+      applyImageViewerZoom();
+    }
+
+    function closeImageViewer() {
+      if (!imageViewerOverlay || !imageViewerImage) return;
+      imageViewerOverlay.classList.add("hidden");
+      imageViewerImage.removeAttribute("src");
+      imageViewerImage.alt = "图片预览";
+      imageViewerImage.classList.remove("dragging");
+      if (imageViewerMeta) imageViewerMeta.textContent = "图片预览";
+      imageViewerImage.style.removeProperty("width");
+      imageViewerImage.style.removeProperty("height");
+      if (imageViewerBody) {
+        imageViewerBody.scrollTop = 0;
+        imageViewerBody.scrollLeft = 0;
+      }
+      imageViewerZoom = 1;
+      imageViewerFitScale = 1;
+      imageViewerNaturalWidth = 0;
+      imageViewerNaturalHeight = 0;
+      imageViewerDragActive = false;
+      imageViewerDragMoved = false;
+      imageViewerSuppressCloseClick = false;
+      updateImageViewerZoomLabel();
+      imageViewerSourceUrl = "";
+      document.body.classList.remove("image-viewer-open");
+    }
+
+    function openImageViewer(src, meta = "", alt = "") {
+      const imageSrc = String(src || "").trim();
+      if (!imageSrc || !imageViewerOverlay || !imageViewerImage) return false;
+      imageViewerSourceUrl = imageSrc;
+      imageViewerZoom = 1;
+      imageViewerFitScale = 1;
+      imageViewerNaturalWidth = 0;
+      imageViewerNaturalHeight = 0;
+      imageViewerImage.style.removeProperty("width");
+      imageViewerImage.style.removeProperty("height");
+      imageViewerImage.src = imageSrc;
+      imageViewerImage.alt = String(alt || meta || "图片预览");
+      imageViewerImage.onload = () => {
+        recalcImageViewerFitScale();
+      };
+      if (imageViewerMeta) {
+        imageViewerMeta.textContent = String(meta || alt || "图片预览");
+      }
+      imageViewerOverlay.classList.remove("hidden");
+      document.body.classList.add("image-viewer-open");
+      updateImageViewerZoomLabel();
+      if (imageViewerBody) {
+        imageViewerBody.scrollTop = 0;
+        imageViewerBody.scrollLeft = 0;
+      }
+      if (imageViewerImage.complete) {
+        recalcImageViewerFitScale();
+      }
+      if (imageViewerCloseBtn && typeof imageViewerCloseBtn.focus === "function") {
+        imageViewerCloseBtn.focus({ preventScroll: true });
+      }
+      return true;
     }
 
     async function openExtractedSourcePreview(source) {
@@ -4310,11 +4737,28 @@
         wrap.className = "source-frame-wrap";
 
         if (kind === "image") {
+          const sourceLabel = source.replace(/^session\//, "").replace(/^internal\//, "");
           const img = document.createElement("img");
           img.className = "source-image";
           img.alt = source;
           img.src = blobUrl;
+          img.classList.add("clickable-preview");
+          img.title = "点击查看大图";
+          img.addEventListener("click", () => {
+            openImageViewer(blobUrl, sourceLabel || source, source);
+          });
           wrap.appendChild(img);
+          const actions = document.createElement("div");
+          actions.className = "source-image-actions";
+          const expandBtn = document.createElement("button");
+          expandBtn.type = "button";
+          expandBtn.className = "source-image-expand-btn";
+          expandBtn.textContent = "查看大图";
+          expandBtn.addEventListener("click", () => {
+            openImageViewer(blobUrl, sourceLabel || source, source);
+          });
+          actions.appendChild(expandBtn);
+          wrap.appendChild(actions);
           if (isRedacted) {
             const badge = document.createElement("div");
             badge.className = "source-redact-badge";
@@ -5551,10 +5995,11 @@
             card.appendChild(imgWrap);
             if (sourceKey) {
               imgWrap.classList.add("clickable-preview");
-              imgWrap.title = "点击查看完整图片";
-              maskedImg.title = "点击查看完整图片";
+              imgWrap.title = "点击全屏查看图片";
+              maskedImg.title = "点击全屏查看图片";
               imgWrap.addEventListener("click", () => {
-                openUploadItemSourcePreview(item);
+                const currentSrc = String(maskedImg.currentSrc || maskedImg.src || "").trim();
+                openImageViewer(currentSrc, item.file || "上传图片", maskedImg.alt || item.file || "上传图片");
               });
             }
 
