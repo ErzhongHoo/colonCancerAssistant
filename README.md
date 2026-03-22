@@ -242,6 +242,8 @@ cp .env.example .env
 | `OPENVIKING_NATIVE_ENABLED` | `true` | 启用官方 OpenViking SDK 作为主检索通道 |
 | `OPENVIKING_NATIVE_STORAGE_PATH` | `./data/openviking_native` | OpenViking 本地存储目录 |
 | `OPENVIKING_NATIVE_AGFS_PORT` | `1833` | 内嵌 AGFS 端口（多实例需错开） |
+| `OPENVIKING_NATIVE_CALL_TIMEOUT_SECONDS` | `12` | 单次原生检索/读取调用超时；设为 `0` 或 `none` 可禁用 |
+| `OPENVIKING_NATIVE_COOLDOWN_SECONDS` | `30` | 原生调用超时后的熔断冷却时间 |
 | `OPENVIKING_RAG_L1_BUDGET` | `6` | 默认 L1 概览读取数量 |
 | `OPENVIKING_RAG_L2_BUDGET` | `2` | 默认 L2 原文读取数量 |
 | `OPENVIKING_RAG_DEEP_L1_BUDGET` | `10` | 深入模式 L1 预算 |

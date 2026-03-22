@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import hashlib
 import io
 import base64
@@ -72,6 +73,8 @@ try:
 except Exception:
     fitz = None
 
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -105,6 +108,17 @@ try:
     ALIYUN_OCR_MAX_PIXELS = max(int(_aliyun_ocr_max_pixels_raw), 0)
 except Exception:
     ALIYUN_OCR_MAX_PIXELS = 8_388_608
+try:
+    IMAGE_PREVIEW_FALLBACK_TOP_RATIO = min(
+        max(float(os.getenv("IMAGE_PREVIEW_FALLBACK_TOP_RATIO", "0.14").strip() or 0.14), 0.06),
+        0.35,
+    )
+except Exception:
+    IMAGE_PREVIEW_FALLBACK_TOP_RATIO = 0.14
+try:
+    IMAGE_PREVIEW_FALLBACK_TOP_MAX_PX = max(int(os.getenv("IMAGE_PREVIEW_FALLBACK_TOP_MAX_PX", "160").strip() or 160), 48)
+except Exception:
+    IMAGE_PREVIEW_FALLBACK_TOP_MAX_PX = 160
 ENABLE_IMAGE_DATE_VLM = os.getenv("ENABLE_IMAGE_DATE_VLM", "true").strip().lower() in {"1", "true", "yes", "on"}
 TIMELINE_ENCODER = os.getenv("TIMELINE_ENCODER", "mamba").strip().lower()
 if TIMELINE_ENCODER not in {"linear", "ssm", "mamba"}:
@@ -441,10 +455,13 @@ def _chat_progress_fail(request_id: str, error: str) -> None:
 
 def _chat_progress_payload(request_id: str) -> dict[str, Any] | None:
     _cleanup_chat_progress()
+    now = time.time()
     with chat_progress_lock:
         state = chat_progress_states.get(request_id)
         if state is None:
             return None
+        elapsed_seconds = max(int(now - state.started_at), 0)
+        step_elapsed_seconds = max(int(now - state.updated_at), 0)
         return {
             "request_id": state.request_id,
             "session_id": state.session_id,
@@ -453,7 +470,8 @@ def _chat_progress_payload(request_id: str) -> dict[str, Any] | None:
             "status": state.status,
             "done": state.done,
             "step_index": CHAT_PROGRESS_INDEX.get(state.step, -1),
-            "elapsed_seconds": state.elapsed_seconds,
+            "elapsed_seconds": elapsed_seconds,
+            "step_elapsed_seconds": step_elapsed_seconds,
             "updated_at": int(state.updated_at),
             "started_at": int(state.started_at),
             "error": state.error,
@@ -721,6 +739,80 @@ def _is_within_base(path: Path, base: Path) -> bool:
         return False
 
 
+def _build_image_preview_debug(
+    *,
+    preview_mode: str = "",
+    preview_reason: str = "",
+    original_file: dict[str, Any] | None = None,
+    masked_file: dict[str, Any] | None = None,
+    image_redaction: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    original = original_file if isinstance(original_file, dict) else {}
+    masked = masked_file if isinstance(masked_file, dict) else {}
+    redaction = image_redaction if isinstance(image_redaction, dict) else {}
+    return {
+        "mode": str(preview_mode or "").strip(),
+        "reason": str(preview_reason or "").strip(),
+        "original_saved": bool(original.get("saved")),
+        "original_path": str(original.get("path", "") or ""),
+        "masked_saved": bool(masked.get("saved")),
+        "masked_path": str(masked.get("path", "") or ""),
+        "ocr_provider": OCR_PROVIDER,
+        "paddle_available": is_paddle_available(),
+        "engine": str(redaction.get("engine", "") or "none"),
+        "ocr_word_count": int(redaction.get("ocr_word_count", 0) or 0),
+        "sensitive_box_count": int(redaction.get("sensitive_box_count", 0) or 0),
+        "masked_data_url_present": bool(redaction.get("masked_data_url")),
+    }
+
+
+def _build_coarse_image_redaction_result(
+    file_bytes: bytes,
+    *,
+    reason: str,
+    engine: str,
+    top_ratio: float = IMAGE_PREVIEW_FALLBACK_TOP_RATIO,
+) -> dict[str, Any]:
+    try:
+        image = Image.open(io.BytesIO(file_bytes))
+        width, height = image.size
+    except Exception as exc:
+        return {
+            "available": False,
+            "engine": engine or "fallback",
+            "reason": f"fallback_mask_failed:{type(exc).__name__}",
+            "ocr_word_count": 0,
+            "sensitive_box_count": 0,
+            "boxes": [],
+        }
+
+    ratio = max(0.06, min(top_ratio, 0.35))
+    mask_height = max(48, min(height, int(height * ratio), IMAGE_PREVIEW_FALLBACK_TOP_MAX_PX))
+    boxes = [
+        {
+            "text": "fallback_header_mask",
+            "types": ["fallback_header_mask"],
+            "x1": 0,
+            "y1": 0,
+            "x2": int(width),
+            "y2": int(mask_height),
+            "image_width": int(width),
+            "image_height": int(height),
+        }
+    ]
+    masked_bytes = draw_redaction_boxes(file_bytes, boxes)
+    data_url = "data:image/jpeg;base64," + base64.b64encode(masked_bytes).decode("ascii")
+    return {
+        "available": True,
+        "engine": f"{engine or 'fallback'}+fallback_mask",
+        "reason": reason,
+        "ocr_word_count": 0,
+        "sensitive_box_count": len(boxes),
+        "boxes": boxes,
+        "masked_data_url": data_url,
+    }
+
+
 def _resolve_original_file_for_source(
     source: str,
     *,
@@ -809,6 +901,77 @@ def _resolve_source_from_viking_uri(
         rel = unquote(str(m2.group(1) or "").strip().lstrip("/\\"))
         if rel:
             return f"session/{rel}"
+
+    candidate_store: VectorStore | None = None
+    if user_id:
+        candidate_store = _get_user_store(user_id)
+    elif session_id:
+        candidate_store = _get_session_store(session_id)
+
+    def _normalize_name_for_match(name: str) -> str:
+        normalized = unquote(str(name or "")).strip().lower()
+        normalized = re.sub(r"[^a-z0-9._-]+", "", normalized)
+        normalized = re.sub(r"[-_]{2,}", "_", normalized)
+        return normalized
+
+    def _extract_viking_name_hints(raw_uri: str) -> list[str]:
+        hints: list[str] = []
+        seen: set[str] = set()
+        body = raw_uri[len(prefix):].strip("/")
+        for segment in body.split("/"):
+            seg = unquote(str(segment or "").strip())
+            if not seg:
+                continue
+            cleaned = re.sub(r"-[0-9a-f]{12,}$", "", seg, flags=re.IGNORECASE)
+            cleaned = re.sub(r"^(session|internal)-", "", cleaned, flags=re.IGNORECASE)
+            for value in (seg, cleaned):
+                text = str(value or "").strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                hints.append(text)
+                m = re.search(r"(20\d{2}[-_]\d{2}[-_]\d{2}.*\.[A-Za-z0-9]{1,8})$", text)
+                if m:
+                    suffix = str(m.group(1) or "").strip()
+                    if suffix and suffix not in seen:
+                        seen.add(suffix)
+                        hints.append(suffix)
+        return hints
+
+    def _score_source_match(source: str, hints: list[str]) -> int:
+        basename = Path(str(source or "").removeprefix("session/")).name
+        basename_norm = _normalize_name_for_match(basename)
+        best = 0
+        for hint in hints:
+            hint_norm = _normalize_name_for_match(hint)
+            if not hint_norm:
+                continue
+            if basename == hint or basename_norm == hint_norm:
+                best = max(best, 100)
+            elif basename.endswith(hint) or basename_norm.endswith(hint_norm):
+                best = max(best, 90)
+            elif hint in basename or (hint_norm and hint_norm in basename_norm):
+                best = max(best, 70)
+        return best
+
+    if candidate_store is not None:
+        hints = _extract_viking_name_hints(uri)
+        scored: list[tuple[int, str]] = []
+        seen_sources: set[str] = set()
+        for chunk in getattr(candidate_store, "chunks", []):
+            source = str(getattr(chunk, "source", "") or "").strip()
+            if not source or source in seen_sources:
+                continue
+            seen_sources.add(source)
+            score = _score_source_match(source, hints)
+            if score > 0:
+                scored.append((score, source))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        if scored:
+            top_score = scored[0][0]
+            top_sources = [source for score, source in scored if score == top_score]
+            if len(top_sources) == 1:
+                return top_sources[0]
 
     return ""
 
@@ -948,6 +1111,17 @@ def _sorted_source_chunks(store: VectorStore, source: str) -> list[Any]:
 
 def _merge_source_chunks_text(chunks: list[Any]) -> str:
     return "\n\n".join(str(getattr(c, "text", "") or "").strip() for c in chunks if str(getattr(c, "text", "") or "").strip())
+
+
+def _redact_text_for_display(text: str) -> str:
+    raw = str(text or "")
+    if not raw or not ENABLE_UPLOAD_DEID:
+        return raw
+    try:
+        redacted, _ = redact_sensitive_info(raw)
+        return redacted
+    except Exception:
+        return raw
 
 
 def _normalize_text_for_compare(text: str) -> str:
@@ -1263,7 +1437,7 @@ def _background_upsert_openviking_layers(
 
 
 def _build_evidence_snippet(text: str, query: str, max_chars: int = OPENVIKING_EVIDENCE_SNIPPET_MAX_CHARS) -> str:
-    payload = str(text or "")
+    payload = _redact_text_for_display(text)
     if not payload:
         return ""
     if len(payload) <= max_chars:
@@ -1373,7 +1547,7 @@ def _build_source_text_index(vector_store: VectorStore | None) -> dict[str, str]
         by_source.setdefault(src, []).append(chunk)
     for src, chunks in by_source.items():
         chunks.sort(key=lambda c: _chunk_order_key(str(getattr(c, "id", ""))))
-        text = _merge_source_chunks_text(chunks)
+        text = _redact_text_for_display(_merge_source_chunks_text(chunks))
         if text:
             out[src] = text
     return out
@@ -1969,20 +2143,54 @@ MODEL_DISCLOSURE_PATTERNS = [
 def _sanitize_model_disclosure(answer: str) -> str:
     if not answer.strip():
         return answer
+    out = answer
     hit = any(p.search(answer) for p in MODEL_DISCLOSURE_PATTERNS)
-    if not hit:
-        return answer
-    safe_line = "我是医疗助手，会基于你提供的资料给出风险与就医建议。"
-    lines = answer.splitlines()
-    sanitized: list[str] = []
-    for line in lines:
-        if any(p.search(line) for p in MODEL_DISCLOSURE_PATTERNS):
-            sanitized.append(safe_line)
-        else:
-            sanitized.append(line)
-    out = "\n".join(sanitized).strip()
+    if hit:
+        safe_line = "我是医疗助手，会基于你提供的资料给出风险与就医建议。"
+        lines = answer.splitlines()
+        sanitized: list[str] = []
+        for line in lines:
+            if any(p.search(line) for p in MODEL_DISCLOSURE_PATTERNS):
+                sanitized.append(safe_line)
+            else:
+                sanitized.append(line)
+        out = "\n".join(sanitized).strip()
     out = re.sub(r"(?:Qwen|通义|千问)\S*", "医疗助手", out, flags=re.IGNORECASE)
+    out = re.sub(r"[（(]\s*risk_level\s*=\s*(?:high|moderate|low|info|unknown)\s*[)）]", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\brisk_level\s*=\s*(?:high|moderate|low|info|unknown)\b", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bevent_count\s*=\s*\d+\b", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bhigh_risk_events\s*=\s*\d+\b", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\brisk_score\s*=\s*[0-9.]+\b", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"（\s*）", "", out)
+    out = re.sub(r"\(\s*\)", "", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
     return out
+
+
+def _risk_level_display(level: Any) -> str:
+    value = str(level or "").strip().lower()
+    mapping = {
+        "high": "高",
+        "moderate": "中",
+        "low": "低",
+        "info": "提示",
+        "unknown": "未知",
+    }
+    return mapping.get(value, value or "未知")
+
+
+def _timeline_supports_trend_summary(events: list[ClinicalEvent]) -> bool:
+    known_dates = {
+        str(ev.date or "").strip()
+        for ev in events
+        if str(ev.date or "").strip() and str(ev.date or "").strip() != "未知日期"
+    }
+    sources = {
+        str(ev.source or "").strip()
+        for ev in events
+        if str(ev.source or "").strip()
+    }
+    return len(known_dates) >= 2 or len(sources) >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -2520,7 +2728,7 @@ def _strip_evidence_citations(answer: str) -> str:
 
 
 def _normalize_answer_citations(answer: str, ranked_sources: list[dict[str, Any]] | None = None) -> str:
-    _ = ranked_sources
+    max_rank = len(ranked_sources or [])
     text = str(answer or "")
     if not text:
         return text
@@ -2585,6 +2793,40 @@ def _normalize_answer_citations(answer: str, ranked_sources: list[dict[str, Any]
         text,
         flags=re.IGNORECASE,
     )
+
+    # Normalize bare numeric citations like [1] or [1, 3-4] when they fit
+    # the current evidence range. This keeps the frontend linkifier working
+    # even if the model omits the explicit "证据#" prefix.
+    if max_rank > 0:
+        def _replace_plain_numeric_citation(match: re.Match[str]) -> str:
+            inner = str(match.group(1) or "").strip()
+            parts = re.split(r"[,，]", inner)
+            nums: list[int] = []
+            for part in parts:
+                cleaned = part.strip()
+                range_m = re.match(r"^(\d+)\s*[-–]\s*(\d+)$", cleaned)
+                if range_m:
+                    start, end = int(range_m.group(1)), int(range_m.group(2))
+                    if start < 1 or end < start or end > max_rank:
+                        return match.group(0)
+                    for i in range(start, min(end + 1, start + 20)):
+                        nums.append(i)
+                    continue
+                if not cleaned.isdigit():
+                    return match.group(0)
+                rank = int(cleaned)
+                if rank < 1 or rank > max_rank:
+                    return match.group(0)
+                nums.append(rank)
+            if not nums:
+                return match.group(0)
+            return "".join(f"[证据#{n}]" for n in nums)
+
+        text = re.sub(
+            r"\[(\d+(?:\s*[-–]\s*\d+)?(?:\s*[,，]\s*\d+(?:\s*[-–]\s*\d+)?)*)\]",
+            _replace_plain_numeric_citation,
+            text,
+        )
 
     # Collapse immediate duplicated [source: ...] markers.
     text = re.sub(
@@ -3000,6 +3242,8 @@ async def upload(
                 "sensitive_box_count": 0,
                 "boxes": [],
             }
+            masked_file = {"saved": False, "path": "", "size": 0}
+            image_preview: dict[str, Any] = {}
             stage_t0 = time.perf_counter()
             if ENABLE_UPLOAD_DEID:
                 text, redaction_stats = redact_sensitive_info(text)
@@ -3015,25 +3259,27 @@ async def upload(
                     not image_has_sensitive_boxes
                     and str(image_redaction.get("reason", "") or "") == "no_sensitive_boxes"
                 )
-            stage_ms["image_redaction_ms"] = round(_ms(stage_t0), 2)
-            if SAVE_UPLOAD_ORIGINALS:
-                if not is_image:
-                    original_file = _save_upload_original(
-                        source_key,
+                if (
+                    not image_redaction.get("available")
+                    and str(image_redaction.get("reason", "") or "") != "no_sensitive_boxes"
+                ):
+                    image_redaction = _build_coarse_image_redaction_result(
                         file_bytes,
-                        user_id=auth_user_id,
-                        session_id=None if auth_user_id else session_id,
+                        reason=f"coarse_top_mask:{str(image_redaction.get('reason', '') or 'unknown')}",
+                        engine=str(image_redaction.get("engine", "") or "fallback"),
                     )
-                else:
-                    if image_privacy_cleared:
-                        original_file = _save_upload_original(
-                            source_key,
-                            file_bytes,
-                            user_id=auth_user_id,
-                            session_id=None if auth_user_id else session_id,
-                        )
-            elif is_image and image_privacy_cleared:
-                # Keep privacy-cleared images available for source preview even when raw-original storage is off.
+                    image_has_sensitive_boxes = int(image_redaction.get("sensitive_box_count", 0) or 0) > 0
+                    image_privacy_cleared = False
+            stage_ms["image_redaction_ms"] = round(_ms(stage_t0), 2)
+            if is_image and image_privacy_cleared:
+                # Always keep privacy-cleared images available for source preview.
+                original_file = _save_upload_original(
+                    source_key,
+                    file_bytes,
+                    user_id=auth_user_id,
+                    session_id=None if auth_user_id else session_id,
+                )
+            elif SAVE_UPLOAD_ORIGINALS and not is_image:
                 original_file = _save_upload_original(
                     source_key,
                     file_bytes,
@@ -3050,14 +3296,14 @@ async def upload(
                     _masked_bytes = _decode_masked_data_url(image_redaction.get("masked_data_url", ""))
                     if not _masked_bytes:
                         raise ValueError("masked_data_url decode failed")
-                    _save_upload_original(
+                    masked_file = _save_upload_original(
                         _masked_upload_source_name(source_key),
                         _masked_bytes,
                         user_id=auth_user_id,
                         session_id=None if auth_user_id else session_id,
                     )
-                except Exception:
-                    pass  # best-effort; do not block upload on masking save failure
+                except Exception as exc:
+                    image_redaction["mask_save_error"] = f"{type(exc).__name__}: {exc}"
             if is_image:
                 preview_mode = ""
                 preview_reason = str(image_redaction.get("reason", "") or "")
@@ -3065,6 +3311,33 @@ async def upload(
                     preview_mode = "masked"
                 elif image_privacy_cleared:
                     preview_mode = "original_safe"
+                image_preview = _build_image_preview_debug(
+                    preview_mode=preview_mode,
+                    preview_reason=preview_reason,
+                    original_file=original_file,
+                    masked_file=masked_file,
+                    image_redaction=image_redaction,
+                )
+                logger.info(
+                    "image_redaction_debug file=%s provider=%s paddle_available=%s engine=%s reason=%s ocr_words=%s boxes=%s preview_mode=%s original_saved=%s masked_saved=%s masked_data_url=%s",
+                    file_name,
+                    image_preview.get("ocr_provider", ""),
+                    image_preview.get("paddle_available", False),
+                    image_preview.get("engine", ""),
+                    image_preview.get("reason", ""),
+                    image_preview.get("ocr_word_count", 0),
+                    image_preview.get("sensitive_box_count", 0),
+                    image_preview.get("mode", ""),
+                    image_preview.get("original_saved", False),
+                    image_preview.get("masked_saved", False),
+                    image_preview.get("masked_data_url_present", False),
+                )
+                if image_redaction.get("mask_save_error"):
+                    logger.warning(
+                        "image_redaction_mask_save_failed file=%s error=%s",
+                        file_name,
+                        image_redaction.get("mask_save_error", ""),
+                    )
                 if preview_mode:
                     _save_upload_preview_meta(
                         source_key,
@@ -3170,6 +3443,7 @@ async def upload(
                     "redaction": redaction,
                     "redaction_preview": redaction_preview,
                     "image_redaction": image_redaction,
+                    "image_preview": image_preview,
                     "original_file": original_file,
                     "authenticated": auth_user_id is not None,
                 },
@@ -3183,6 +3457,7 @@ async def upload(
                     "redaction": redaction,
                     "redaction_preview": redaction_preview,
                     "image_redaction": image_redaction,
+                    "image_preview": image_preview,
                     "original_file": original_file,
                     "timeline_events": extracted_events,
                     "openviking_l0": layered_stats.get("l0", 0),
@@ -3242,12 +3517,18 @@ def upload_debug(
 
     source_chunks = _sorted_source_chunks(active_store, full_source)
     extracted_text = _merge_source_chunks_text(source_chunks)
+    if ENABLE_UPLOAD_DEID and extracted_text:
+        extracted_text, _ = redact_sensitive_info(extracted_text)
     max_preview = min(max(int(preview_chars), 120), 8000)
     chunk_samples = [
         {
             "id": str(getattr(chunk, "id", "")),
             "chars": len(str(getattr(chunk, "text", "") or "")),
-            "text_preview": str(getattr(chunk, "text", "") or "")[: min(max_preview, 360)],
+            "text_preview": (
+                redact_sensitive_info(str(getattr(chunk, "text", "") or ""))[0]
+                if ENABLE_UPLOAD_DEID
+                else str(getattr(chunk, "text", "") or "")
+            )[: min(max_preview, 360)],
         }
         for chunk in source_chunks[:8]
     ]
@@ -3265,6 +3546,26 @@ def upload_debug(
         "size": int(original_path.stat().st_size) if original_exists and original_path else 0,
         "updated_at": int(original_path.stat().st_mtime) if original_exists and original_path else 0,
     }
+    masked_path = _original_file_path_for_source(
+        _masked_upload_source_name(full_source),
+        user_id=auth_user_id,
+        session_id=None if auth_user_id else session_id,
+    )
+    masked_exists = bool(masked_path and masked_path.exists() and masked_path.is_file())
+    preview_meta = _load_upload_preview_meta(
+        full_source,
+        user_id=auth_user_id,
+        session_id=None if auth_user_id else session_id,
+    )
+    image_preview = _build_image_preview_debug(
+        preview_mode=str(preview_meta.get("mode", "") or ""),
+        preview_reason=str(preview_meta.get("reason", "") or ""),
+        original_file={"saved": original_exists, "path": original_meta.get("path", "")},
+        masked_file={
+            "saved": masked_exists,
+            "path": _relative_to_root(masked_path) if masked_exists and masked_path else "",
+        },
+    )
 
     l0_payload: list[dict[str, Any]] = []
     l1_payload: list[dict[str, Any]] = []
@@ -3354,6 +3655,7 @@ def upload_debug(
             "persistent": auth_user_id is not None,
             "scope": "user" if auth_user_id else "session",
             "original_file": original_meta,
+            "image_preview": image_preview,
             "extraction": {
                 "chunk_count": len(source_chunks),
                 "total_chars": len(extracted_text),
@@ -3392,7 +3694,7 @@ def source_original(request: Request, source: str = "") -> Response:
     if file_path is None:
         masked_path = None
         normalized_source_key = str(source_key or "").strip()
-        if normalized_source_key.startswith("session/"):
+        if normalized_source_key:
             masked_path, _ = _resolve_original_file_for_source(
                 _masked_upload_source_name(normalized_source_key),
                 user_id=auth_user_id,
@@ -3743,6 +4045,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
             timeline_events,
             max_items=30 if is_comprehensive else 8,
         )
+        timeline_supports_trend = _timeline_supports_trend_summary(timeline_events)
         openviking_trace: dict[str, Any] = {"enabled": OPENVIKING_ENABLED, "comprehensive": is_comprehensive}
 
         user_store = _get_user_store(auth_user_id) if auth_user_id else _get_session_store(session_id)
@@ -3811,7 +4114,7 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
         source_text_index = _build_source_text_index(user_store)
         context_rows: list[str] = []
         for rank, item in enumerate(evidence_items, start=1):
-            item_text = str(item.get("text", "") or "")
+            item_text = _redact_text_for_display(str(item.get("text", "") or ""))
             snippet = _build_evidence_snippet(
                 item_text,
                 payload.message,
@@ -3916,9 +4219,9 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                     {
                         "role": "system",
                         "content": (
-                            f"患者时序状态({TIMELINE_ENCODER}): "
-                            f"risk_level={timeline_state.get('risk_level')} "
-                            f"event_count={int(float(timeline_state.get('event_count', 0.0)))}\n"
+                            "以下为已有的时序背景，仅在与问题直接相关时参考，不要直接输出系统字段名。\n"
+                            f"风险等级参考：{_risk_level_display(timeline_state.get('risk_level'))}\n"
+                            f"事件总数：{int(float(timeline_state.get('event_count', 0.0)))}\n"
                             f"已有上下文信息：\n{fallback_context}"
                         ),
                     },
@@ -3966,41 +4269,45 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                         "role": "system",
                         "content": (
                             "你是一位资深临床医生，正在为患者综合解读全部检查报告。"
-                            "核心原则：简洁、精准、只讲有临床意义的发现，句句到位。\n\n"
+                            "核心原则：先解读报告本身，再看趋势背景；简洁、精准、只讲有临床意义的发现，句句到位。\n\n"
                             "必须遵守的输出规则：\n"
                             "1. 只讨论有明确临床意义的异常——轻微偏离参考值但无临床后果的指标不要提。\n"
                             "2. 不要使用任何 emoji 或表情符号。\n"
                             "3. 不要为了显得全面而罗列正常指标。正常就一句话带过：'肝肾功能正常'即可。\n"
                             "4. 不要做过度推测或展开鉴别诊断长串。聚焦当前诊断和治疗相关。\n"
-                            "5. 语言通俗但不失专业准确性，让患者家属能看懂。"
+                            "5. 语言通俗但不失专业准确性，让患者家属能看懂。\n"
+                            "6. 先依据当前报告/检查原文作答，不要先给整体风险等级总结。\n"
+                            "7. 若当前主要是单份报告或同日化验，按这份报告本身解读，不要扩展成全病程高风险总结。\n"
+                            "8. 不要把 risk_level、event_count、risk_score 这类内部字段写给用户。"
                         ),
                     },
                     {
                         "role": "system",
                         "content": (
                             "输出结构（简洁版）：\n"
-                            "1. 总体评价：1-2句话概括当前状态和治疗效果，结论加粗。\n"
-                            "2. 关键发现：只列出真正需要关注的异常项（通常2-5项），每项用加粗标题+1-2句解释。\n"
-                            "3. 趋势判断：与既往数据对比，指出好转/稳定/恶化。\n"
+                            "1. 总体评价：先用1-2句话说明这份/这些报告最重要的结论，结论加粗。\n"
+                            "2. 关键发现：只列出真正需要关注的异常项（通常2-5项），每项用加粗标题+1-2句解释，并尽量带原始数值。\n"
+                            "3. 趋势判断：仅在存在跨时间或跨报告变化时再写，指出好转/稳定/恶化。\n"
                             "4. 建议：仅列出确实需要做的事，不超过3-5条。\n\n"
                             "不要反问用户要解读哪份报告。直接综合解读。\n"
                             "引用关键数据时标注 [证据#N]，但只给关键结论加，不要每句都加。"
                         ),
                     },
-                    {
-                        "role": "system",
-                        "content": (
-                            f"患者病程时间线（{TIMELINE_ENCODER}）：\n"
-                            f"风险等级: {timeline_state.get('risk_level')}\n"
-                            f"事件总数: {int(float(timeline_state.get('event_count', 0.0)))}\n"
-                            f"高风险事件: {int(float(timeline_state.get('high_risk_events', 0.0)))}\n"
-                            f"综合关注指数: {timeline_state.get('risk_score', 0)}\n\n"
-                            f"病程摘要:\n{timeline_summary}"
-                        ),
-                    },
                     {"role": "system", "content": f"以下是用户上传的所有报告/检查证据（共{len(evidence_items)}条，编号为 evidence#1 至 evidence#{len(evidence_items)}），请综合解读。引用时只能使用这些编号，不要使用超出范围的编号：\n{context}"},
-                    {"role": "system", "content": style_hint},
                 ]
+                if timeline_supports_trend and timeline_summary.strip():
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "以下是跨时间/跨报告的辅助背景，仅用于趋势判断，不得替代当前报告解读，"
+                                "也不要直接输出系统字段名。\n"
+                                f"风险等级参考：{_risk_level_display(timeline_state.get('risk_level'))}\n"
+                                f"病程摘要:\n{timeline_summary}"
+                            ),
+                        }
+                    )
+                messages.append({"role": "system", "content": style_hint})
             else:
                 # -- Standard RAG prompt --
                 messages = [
@@ -4033,9 +4340,9 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
                         "role": "system",
                         "content": (
                             "以下信息是可选背景，仅在与本轮问题直接相关时使用；若不相关请忽略，不得据此扩展结论。\n"
-                            f"患者时序状态({TIMELINE_ENCODER}): "
-                            f"risk_level={timeline_state.get('risk_level')} "
-                            f"event_count={int(float(timeline_state.get('event_count', 0.0)))}\n"
+                            f"患者时序背景：风险等级参考={_risk_level_display(timeline_state.get('risk_level'))}；"
+                            f"事件总数={int(float(timeline_state.get('event_count', 0.0)))}。\n"
+                            "不要直接复述系统字段名，也不要把背景摘要当成检验报告原文。\n"
                             f"检索路由建议: {retrieval_hint}\n"
                             f"病程摘要:\n{timeline_summary}"
                         ),
@@ -4077,8 +4384,12 @@ def chat(payload: ChatRequest, request: Request) -> JSONResponse:
             answer = re.sub(r"\[证据#(\d+)\]", _strip_oob_citation, answer)
             cited_sources = _extract_source_citations(answer)
             cited_ranks = _extract_evidence_ranks(answer)
-            if not cited_sources and not cited_ranks:
-                citation_warning = "回答未显式标注证据，已附加关键证据编号索引。"
+            if not cited_ranks:
+                citation_warning = (
+                    "回答未显式标注证据编号，已附加关键证据编号索引。"
+                    if cited_sources
+                    else "回答未显式标注证据，已附加关键证据编号索引。"
+                )
                 rank_refs = [f"[证据#{int(item.get('rank', 0) or 0)}]" for item in ranked_sources[:3] if int(item.get("rank", 0) or 0) > 0]
                 if rank_refs:
                     answer = f"{answer.rstrip()}\n\n参考来源：{' '.join(rank_refs)}（详见下方证据卡片）"

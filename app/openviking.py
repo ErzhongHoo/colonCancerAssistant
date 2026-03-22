@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import re
 import tempfile
 import threading
@@ -25,6 +26,16 @@ def _env_flag(name: str, default: str = "true") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_timeout(name: str, default: str) -> float | None:
+    raw = os.getenv(name, default).strip().lower()
+    if raw in {"0", "none", "off", "false", "no"}:
+        return None
+    try:
+        return max(float(raw or default), 1.0)
+    except Exception:
+        return max(float(default), 1.0)
+
+
 def _pick_api_key() -> str:
     return (
         os.getenv("DASHSCOPE_API_KEY")
@@ -39,6 +50,8 @@ def _pick_api_key() -> str:
 _NATIVE_LOCK = threading.Lock()
 _NATIVE_CLIENT: Any | None = None
 _NATIVE_INIT_ERROR: str = ""
+_NATIVE_CALL_TIMEOUT_SECONDS = _env_timeout("OPENVIKING_NATIVE_CALL_TIMEOUT_SECONDS", "12")
+_NATIVE_COOLDOWN_SECONDS = max(float(os.getenv("OPENVIKING_NATIVE_COOLDOWN_SECONDS", "30") or "30"), 0.0)
 
 
 def _native_storage_path() -> Path:
@@ -146,6 +159,8 @@ class OpenVikingStore:
         self.items: list[LayerItem] = []
         self._matrix_cache: dict[str, np.ndarray] = {}
         self._native_client = _get_native_client()
+        self._native_disabled_until = 0.0
+        self._native_runtime_error = ""
         self._native_sources: dict[str, dict[str, Any]] = {}
         self._native_index_path = (
             db_path.with_name("openviking_native_index.json") if db_path is not None else None
@@ -155,11 +170,72 @@ class OpenVikingStore:
 
     @property
     def native_enabled(self) -> bool:
-        return self._native_client is not None
+        return self._native_client is not None and time.time() >= self._native_disabled_until
 
     @property
     def native_error(self) -> str:
-        return _NATIVE_INIT_ERROR
+        if _NATIVE_INIT_ERROR:
+            return _NATIVE_INIT_ERROR
+        if self._native_runtime_error and time.time() < self._native_disabled_until:
+            return self._native_runtime_error
+        return ""
+
+    def _native_available(self) -> bool:
+        return self._native_client is not None and time.time() >= self._native_disabled_until
+
+    def _mark_native_runtime_failure(self, error: str, *, disable: bool = False) -> None:
+        self._native_runtime_error = str(error or "").strip()
+        if disable and _NATIVE_COOLDOWN_SECONDS > 0:
+            self._native_disabled_until = time.time() + _NATIVE_COOLDOWN_SECONDS
+
+    def _call_native(
+        self,
+        method_name: str,
+        *args: Any,
+        call_timeout: float | None = _NATIVE_CALL_TIMEOUT_SECONDS,
+        **kwargs: Any,
+    ) -> tuple[bool, Any]:
+        if not self._native_available():
+            return False, None
+        fn = getattr(self._native_client, method_name, None)
+        if fn is None:
+            return False, None
+        if call_timeout is None:
+            try:
+                out = fn(*args, **kwargs)
+                self._native_runtime_error = ""
+                return True, out
+            except Exception as exc:
+                self._native_runtime_error = f"{type(exc).__name__}: {exc}"
+                return False, None
+        result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+        def runner() -> None:
+            try:
+                result_queue.put(("ok", fn(*args, **kwargs)))
+            except Exception as exc:
+                result_queue.put(("err", exc))
+
+        thread = threading.Thread(
+            target=runner,
+            name=f"openviking-{method_name}",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            status, payload = result_queue.get(timeout=call_timeout)
+        except queue.Empty:
+            self._mark_native_runtime_failure(
+                f"{method_name}_timeout_after_{float(call_timeout):.1f}s",
+                disable=True,
+            )
+            return False, None
+        if status != "ok":
+            if isinstance(payload, BaseException):
+                self._native_runtime_error = f"{type(payload).__name__}: {payload}"
+            return False, None
+        self._native_runtime_error = ""
+        return True, payload
 
     def _derive_namespace(self) -> str:
         if self.db_path is None:
@@ -588,15 +664,15 @@ class OpenVikingStore:
         return out
 
     def _native_find_resources(self, query: str, limit: int) -> list[Any]:
-        if self._native_client is None:
+        if not self._native_available():
             return []
-        try:
-            result = self._native_client.find(
-                query=str(query),
-                target_uri=self._native_base_uri,
-                limit=max(int(limit), 1),
-            )
-        except Exception:
+        ok, result = self._call_native(
+            "find",
+            query=str(query),
+            target_uri=self._native_base_uri,
+            limit=max(int(limit), 1),
+        )
+        if not ok:
             return []
 
         out = []
@@ -639,23 +715,24 @@ class OpenVikingStore:
         return out
 
     def session(self, session_id: str | None = None) -> Any | None:
-        if self._native_client is None:
+        ok, out = self._call_native("session", session_id=session_id)
+        if not ok:
             return None
-        try:
-            return self._native_client.session(session_id=session_id)
-        except Exception:
-            return None
+        return out
 
     def wait_processed(self, timeout: float | None = None) -> dict[str, Any]:
-        if self._native_client is None:
+        if not self._native_available():
             return {"ok": False, "reason": "native_unavailable"}
-        try:
-            out = self._native_client.wait_processed(timeout=timeout)
-            if isinstance(out, dict):
-                return out
-            return {"ok": True}
-        except Exception as exc:
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        ok, out = self._call_native(
+            "wait_processed",
+            call_timeout=timeout if timeout is not None else _NATIVE_CALL_TIMEOUT_SECONDS,
+            timeout=timeout,
+        )
+        if not ok:
+            return {"ok": False, "reason": "timeout_or_error"}
+        if isinstance(out, dict):
+            return out
+        return {"ok": True}
 
     def find(
         self,
@@ -663,15 +740,15 @@ class OpenVikingStore:
         target_uri: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        if self._native_client is None:
+        if not self._native_available():
             return []
-        try:
-            result = self._native_client.find(
-                query=str(query or ""),
-                target_uri=str(target_uri or self._native_base_uri),
-                limit=max(int(limit), 1),
-            )
-        except Exception:
+        ok, result = self._call_native(
+            "find",
+            query=str(query or ""),
+            target_uri=str(target_uri or self._native_base_uri),
+            limit=max(int(limit), 1),
+        )
+        if not ok:
             return []
         return self._normalize_resources(result)
 
@@ -683,7 +760,7 @@ class OpenVikingStore:
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        if self._native_client is None:
+        if not self._native_available():
             return []
         kwargs: dict[str, Any] = {
             "query": str(query or ""),
@@ -694,37 +771,33 @@ class OpenVikingStore:
             kwargs["session"] = session
         if filters:
             kwargs["filter"] = filters
-        try:
-            result = self._native_client.search(**kwargs)
-        except Exception:
+        ok, result = self._call_native("search", **kwargs)
+        if not ok:
             # Best-effort fallback: semantic find without multi-step planning.
             return self.find(query=query, target_uri=target_uri, limit=limit)
         return self._normalize_resources(result)
 
     def overview(self, uri: str) -> str:
-        if self._native_client is None:
+        if not self._native_available():
             return ""
-        try:
-            text = self._native_client.overview(str(uri or ""))
-            return str(text or "").strip()
-        except Exception:
+        ok, text = self._call_native("overview", str(uri or ""))
+        if not ok:
             return ""
+        return str(text or "").strip()
 
     def read(self, uri: str) -> str:
-        if self._native_client is None:
+        if not self._native_available():
             return ""
-        try:
-            text = self._native_client.read(str(uri or ""))
-            return str(text or "").strip()
-        except Exception:
+        ok, text = self._call_native("read", str(uri or ""))
+        if not ok:
             return ""
+        return str(text or "").strip()
 
     def ls(self, uri: str) -> list[dict[str, Any]]:
-        if self._native_client is None:
+        if not self._native_available():
             return []
-        try:
-            rows = self._native_client.ls(str(uri or ""))
-        except Exception:
+        ok, rows = self._call_native("ls", str(uri or ""))
+        if not ok:
             return []
         out: list[dict[str, Any]] = []
         for row in list(rows or []):
@@ -737,11 +810,14 @@ class OpenVikingStore:
         return [x for x in out if x.get("uri")]
 
     def glob(self, pattern: str, root_uri: str | None = None) -> list[str]:
-        if self._native_client is None:
+        if not self._native_available():
             return []
-        try:
-            out = self._native_client.glob(str(pattern or ""), uri=str(root_uri or self._native_base_uri))
-        except Exception:
+        ok, out = self._call_native(
+            "glob",
+            str(pattern or ""),
+            uri=str(root_uri or self._native_base_uri),
+        )
+        if not ok:
             return []
         if isinstance(out, dict):
             rows = out.get("matches") or out.get("uris") or out.get("items") or []
@@ -755,33 +831,26 @@ class OpenVikingStore:
             return overview
         if abstract:
             return abstract
-        if self._native_client is None:
+        if not self._native_available():
             return ""
-        try:
-            value = self._native_client.overview(uri)
-            if value:
-                return str(value).strip()
-        except Exception:
-            pass
-        try:
-            value = self._native_client.abstract(uri)
-            if value:
-                return str(value).strip()
-        except Exception:
-            pass
+        ok, value = self._call_native("overview", uri)
+        if ok and value:
+            return str(value).strip()
+        ok, value = self._call_native("abstract", uri)
+        if ok and value:
+            return str(value).strip()
         return ""
 
     def _native_leaf_text(self, uri: str, abstract: str) -> str:
         if abstract:
             return abstract
-        if self._native_client is None:
+        if not self._native_available():
             return ""
-        try:
-            value = self._native_client.read(uri)
-            text = str(value or "").strip()
-            return text[:420]
-        except Exception:
+        ok, value = self._call_native("read", uri)
+        if not ok:
             return ""
+        text = str(value or "").strip()
+        return text[:420]
 
     def _search_layer_native(
         self,

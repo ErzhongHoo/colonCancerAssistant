@@ -4468,6 +4468,19 @@
       return "other";
     }
 
+    function sourceKeyFromUploadItem(item) {
+      const payload = item && typeof item === "object" ? item : null;
+      if (!payload) return "";
+      return normalizePreviewSourceKey(payload.source || payload.source_key || payload.file || "");
+    }
+
+    function openUploadItemSourcePreview(item) {
+      const source = sourceKeyFromUploadItem(item);
+      if (!source) return false;
+      void openSourcePreview(source, 0);
+      return true;
+    }
+
     function cleanupSourcePreviewBlob() {
       if (sourcePreviewBlobUrl && imageViewerSourceUrl === sourcePreviewBlobUrl) {
         closeImageViewer();
@@ -4655,19 +4668,6 @@
       }
 
       sourcePaneBody.appendChild(wrap);
-      return true;
-    }
-
-    function sourceKeyFromUploadItem(item) {
-      const payload = item && typeof item === "object" ? item : null;
-      if (!payload) return "";
-      return normalizePreviewSourceKey(payload.source || payload.source_key || payload.file || "");
-    }
-
-    function openUploadItemSourcePreview(item) {
-      const source = sourceKeyFromUploadItem(item);
-      if (!source) return false;
-      void openSourcePreview(source, 0);
       return true;
     }
 
@@ -4957,8 +4957,12 @@
       if (thinkingStageText) {
         thinkingStageText.textContent = label;
       }
-      if (thinkingElapsed && Number.isFinite(progress.elapsed_seconds)) {
-        const seconds = Math.max(0, Number(progress.elapsed_seconds));
+      const serverSeconds = Number(progress.elapsed_seconds);
+      const localSeconds = thinkingStartedAt
+        ? Math.max(0, Math.floor((Date.now() - thinkingStartedAt) / 1000))
+        : 0;
+      if (thinkingElapsed && Number.isFinite(serverSeconds)) {
+        const seconds = Math.max(localSeconds, Math.max(0, serverSeconds));
         thinkingElapsed.textContent = `${seconds}s`;
       }
       updateThinkingStepTags(step, done);
@@ -5196,29 +5200,30 @@
       });
     }
 
-    function attachRoundEvidence(div, sources, report, warning, keyConclusions, externalSources, literatureGuard, reasoningMode, reasoningMeta) {
-      const msgId = div.dataset.msgId || "0";
-      const sourceList = Array.isArray(sources) ? sources : [];
-      const sourceByRank = new Map(sourceList.map((s) => [Number(s.rank || 0), s]));
-      rememberMessageEvidence(msgId, sourceList);
+	    function attachRoundEvidence(div, sources, report, warning, keyConclusions, externalSources, literatureGuard, reasoningMode, reasoningMeta) {
+	      const msgId = div.dataset.msgId || "0";
+	      const sourceList = Array.isArray(sources) ? sources : [];
+	      const sourceByRank = new Map(sourceList.map((s) => [Number(s.rank || 0), s]));
+	      rememberMessageEvidence(msgId, sourceList);
       if (sourceList.length === 0) {
         div.querySelectorAll('.cite-link[data-cite-type="evidence"]').forEach((linkEl) => {
           const text = document.createTextNode(linkEl.textContent || "");
           linkEl.replaceWith(text);
         });
       }
-      div.querySelectorAll('.cite-link[data-cite-type="evidence"]').forEach((linkEl) => {
-        const rank = Number(linkEl.dataset.citeNum || 0);
-        const src = sourceByRank.get(rank);
-        const previewRef = sourcePreviewRefFromEvidence(src);
-        if (!previewRef) return;
-        linkEl.dataset.sourceDoc = previewRef.sourceDoc;
-        linkEl.dataset.sourcePage = String(previewRef.page);
-      });
-      const usedRanks = new Set();
-      const conclusions = Array.isArray(keyConclusions) ? keyConclusions : [];
-      const external = Array.isArray(externalSources) ? externalSources : [];
-      const litCoverage = literatureGuard?.coverage ?? "n/a";
+	      div.querySelectorAll('.cite-link[data-cite-type="evidence"]').forEach((linkEl) => {
+	        const rank = Number(linkEl.dataset.citeNum || 0);
+	        const src = sourceByRank.get(rank);
+	        const previewRef = sourcePreviewRefFromEvidence(src);
+	        if (!previewRef) return;
+	        linkEl.dataset.sourceDoc = previewRef.sourceDoc;
+	        linkEl.dataset.sourcePage = String(previewRef.page);
+	      });
+	      const hasInlineEvidenceLinks = div.querySelector('.cite-link[data-cite-type="evidence"]') !== null;
+	      const usedRanks = new Set();
+	      const conclusions = Array.isArray(keyConclusions) ? keyConclusions : [];
+	      const external = Array.isArray(externalSources) ? externalSources : [];
+	      const litCoverage = literatureGuard?.coverage ?? "n/a";
       const unsupported = Number(report?.unsupported_claims || 0);
       const coverage = report?.coverage ?? "n/a";
       const summaryText = `关键结论${conclusions.length}条 · 证据${sourceList.length}条 · 文献${external.length}条 · 证据契合=${coverage} · 文献契合=${litCoverage}`;
@@ -5228,13 +5233,46 @@
 
 
 
-      const summary = document.createElement("div");
-      summary.className = "round-meta-summary";
-      summary.textContent = summaryText;
-      wrapper.appendChild(summary);
+	      const summary = document.createElement("div");
+	      summary.className = "round-meta-summary";
+	      summary.textContent = summaryText;
+	      wrapper.appendChild(summary);
+	      if (!hasInlineEvidenceLinks && sourceList.length) {
+	        const fallbackRanks = sourceList
+	          .map((s) => Number(s?.rank || 0))
+	          .filter((rank, idx, arr) => rank > 0 && arr.indexOf(rank) === idx)
+	          .slice(0, 3);
+	        if (fallbackRanks.length) {
+	          const fallbackRefs = document.createElement("div");
+	          fallbackRefs.className = "muted";
+	          fallbackRefs.appendChild(document.createTextNode("参考来源："));
+	          fallbackRanks.forEach((rank, idx) => {
+	            const src = sourceByRank.get(rank);
+	            const previewRef = sourcePreviewRefFromEvidence(src);
+	            const linkEl = document.createElement("a");
+	            linkEl.className = "cite-link cite-evidence";
+	            linkEl.href = `#ev-${msgId}-${rank}`;
+	            linkEl.dataset.citeType = "evidence";
+	            linkEl.dataset.citeNum = String(rank);
+	            linkEl.dataset.msgId = String(msgId);
+	            if (previewRef) {
+	              linkEl.dataset.sourceDoc = previewRef.sourceDoc;
+	              linkEl.dataset.sourcePage = String(previewRef.page);
+	            }
+	            linkEl.title = `点击查看证据 #${rank} 详情`;
+	            linkEl.textContent = `[${rank}]`;
+	            fallbackRefs.appendChild(linkEl);
+	            if (idx < fallbackRanks.length - 1) {
+	              fallbackRefs.appendChild(document.createTextNode(" "));
+	            }
+	          });
+	          fallbackRefs.appendChild(document.createTextNode("（详见下方证据卡片）"));
+	          wrapper.appendChild(fallbackRefs);
+	        }
+	      }
 
-      const panel = document.createElement("div");
-      panel.className = "round-meta-panel";
+	      const panel = document.createElement("div");
+	      panel.className = "round-meta-panel";
       const grid = document.createElement("div");
       grid.className = "round-meta-grid";
 
@@ -5588,6 +5626,34 @@
       progressBarFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
     }
 
+    function buildUploadPrivacyFacts(item) {
+      const facts = [];
+      const originalFile = item.original_file || {};
+      const imageRedaction = item.image_redaction || {};
+      const imagePreview = item.image_preview || {};
+      const preview = Array.isArray(item.redaction_preview) ? item.redaction_preview : [];
+      const totalRedacted = sumRedaction(item);
+
+      facts.push(originalFile.saved ? "原始文件已落盘保存" : "原始文件未落盘保存");
+
+      if (imageRedaction.masked_data_url) {
+        const boxCount = Number(imageRedaction.sensitive_box_count || 0);
+        facts.push(boxCount > 0 ? `图片预览使用打码图，遮挡 ${boxCount} 处` : "图片预览使用打码图");
+      } else if (imageRedaction.reason === "no_sensitive_boxes") {
+        facts.push("图片未检出敏感区域，预览使用安全原图");
+      } else if (imageRedaction.reason && imageRedaction.reason !== "not_image") {
+        facts.push(`图片脱敏结果：${imageRedaction.reason}`);
+      }
+
+      if (totalRedacted > 0) {
+        facts.push(`文本已脱敏 ${totalRedacted} 处`);
+      } else if (preview.length) {
+        facts.push("文本脱敏已执行");
+      }
+
+      return facts;
+    }
+
     function renderFileResult(item) {
       const li = document.createElement("li");
       if (item.ok) {
@@ -5614,9 +5680,17 @@
           title.textContent = totalRedacted > 0 ? `🛡️ 已脱敏 ${totalRedacted} 处敏感信息` : "🛡️ 隐私脱敏扫描完成";
           card.appendChild(title);
 
+          const privacyFacts = buildUploadPrivacyFacts(item);
+          if (privacyFacts.length) {
+            const summary = document.createElement("div");
+            summary.className = "source-text-note";
+            summary.textContent = privacyFacts.join("；");
+            card.appendChild(summary);
+          }
+
           const REDACT_LABELS = {
             id_card: "身份证", phone: "手机号", email: "邮箱",
-            bank_card: "银行卡", name_field: "姓名", address_field: "地址"
+            bank_card: "银行卡", medical_record: "病历号", name_field: "姓名", address_field: "地址"
           };
           const statsBar = document.createElement("div");
           statsBar.className = "redact-stats";
@@ -5687,7 +5761,7 @@
           if (boxes.length) {
             const REDACT_LABELS_INNER = {
               id_card: "身份证", phone: "手机号", email: "邮箱",
-              bank_card: "银行卡", name_field: "姓名", address_field: "地址"
+              bank_card: "银行卡", medical_record: "病历号", name_field: "姓名", address_field: "地址"
             };
             const boxDetails = document.createElement("details");
             boxDetails.className = "slim";
@@ -5736,6 +5810,7 @@
               "<PHONE>": "redact-hl-phone",
               "<EMAIL>": "redact-hl-email",
               "<BANK_CARD>": "redact-hl-bank_card",
+              "<MEDICAL_RECORD>": "redact-hl-bank_card",
               "<NAME>": "redact-hl-name",
               "<ADDRESS>": "redact-hl-address",
             };
@@ -5744,13 +5819,14 @@
               "<PHONE>": "[手机号已脱敏]",
               "<EMAIL>": "[邮箱已脱敏]",
               "<BANK_CARD>": "[银行卡已脱敏]",
+              "<MEDICAL_RECORD>": "[病历号已脱敏]",
               "<NAME>": "[姓名已脱敏]",
               "<ADDRESS>": "[地址已脱敏]",
             };
             preview.forEach((line, idx) => {
               if (idx > 0) pre.appendChild(document.createElement("br"));
               let remaining = line;
-              const tokenPattern = /<(ID_CARD|PHONE|EMAIL|BANK_CARD|NAME|ADDRESS)>/g;
+              const tokenPattern = /<(ID_CARD|PHONE|EMAIL|BANK_CARD|MEDICAL_RECORD|NAME|ADDRESS)>/g;
               let match;
               let lastIdx2 = 0;
               while ((match = tokenPattern.exec(remaining)) !== null) {
@@ -5910,6 +5986,8 @@
         const preview = Array.isArray(item.redaction_preview) ? item.redaction_preview : [];
         const imageRedaction = item.image_redaction || {};
         const hasImageRedaction = imageRedaction.available || imageRedaction.reason === "no_sensitive_boxes" || imageRedaction.reason === "ocr_failed";
+        const sourceKey = sourceKeyFromUploadItem(item);
+        const isImageSource = sourceKindFromName(item.file) === "image";
 
         if (totalRedacted > 0 || preview.length || hasImageRedaction) {
           const card = document.createElement("div");
@@ -5920,6 +5998,14 @@
           title.className = "redact-card-title";
           title.textContent = totalRedacted > 0 ? `🛡️ 已脱敏 ${totalRedacted} 处敏感信息` : "🛡️ 隐私脱敏扫描完成";
           card.appendChild(title);
+
+          const privacyFacts = buildUploadPrivacyFacts(item);
+          if (privacyFacts.length) {
+            const summary = document.createElement("div");
+            summary.className = "source-text-note";
+            summary.textContent = privacyFacts.join("；");
+            card.appendChild(summary);
+          }
 
           if (sourceKey && isImageSource) {
             const actionRow = document.createElement("div");
@@ -5945,7 +6031,7 @@
           // Stats bar
           const REDACT_LABELS = {
             id_card: "身份证", phone: "手机号", email: "邮箱",
-            bank_card: "银行卡", name_field: "姓名", address_field: "地址"
+            bank_card: "银行卡", medical_record: "病历号", name_field: "姓名", address_field: "地址"
           };
           const statsBar = document.createElement("div");
           statsBar.className = "redact-stats";
@@ -6079,6 +6165,7 @@
               "<PHONE>": "redact-hl-phone",
               "<EMAIL>": "redact-hl-email",
               "<BANK_CARD>": "redact-hl-bank_card",
+              "<MEDICAL_RECORD>": "redact-hl-bank_card",
               "<NAME>": "redact-hl-name",
               "<ADDRESS>": "redact-hl-address",
             };
@@ -6087,6 +6174,7 @@
               "<PHONE>": "[手机号已脱敏]",
               "<EMAIL>": "[邮箱已脱敏]",
               "<BANK_CARD>": "[银行卡已脱敏]",
+              "<MEDICAL_RECORD>": "[病历号已脱敏]",
               "<NAME>": "[姓名已脱敏]",
               "<ADDRESS>": "[地址已脱敏]",
             };
@@ -6094,7 +6182,7 @@
               if (idx > 0) pre.appendChild(document.createElement("br"));
               // Split line by tokens and create highlighted spans
               let remaining = line;
-              const tokenPattern = /<(ID_CARD|PHONE|EMAIL|BANK_CARD|NAME|ADDRESS)>/g;
+              const tokenPattern = /<(ID_CARD|PHONE|EMAIL|BANK_CARD|MEDICAL_RECORD|NAME|ADDRESS)>/g;
               let match;
               let lastIdx = 0;
               while ((match = tokenPattern.exec(remaining)) !== null) {

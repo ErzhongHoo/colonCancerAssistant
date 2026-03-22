@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 
 PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS = max(
-    float(os.getenv("PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS", "45") or 45.0),
+    float(os.getenv("PADDLE_OCR_SUBPROCESS_TIMEOUT_SECONDS", "120") or 120.0),
     5.0,
 )
 

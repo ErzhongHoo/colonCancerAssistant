@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 
 
-REDACTION_TOKENS = ("<ID_CARD>", "<PHONE>", "<EMAIL>", "<BANK_CARD>", "<NAME>", "<ADDRESS>")
+REDACTION_TOKENS = ("<ID_CARD>", "<PHONE>", "<EMAIL>", "<BANK_CARD>", "<NAME>", "<ADDRESS>", "<MEDICAL_RECORD>")
 
 
 @dataclass
@@ -13,6 +13,7 @@ class RedactionStats:
     phone: int = 0
     email: int = 0
     bank_card: int = 0
+    medical_record: int = 0
     name_field: int = 0
     address_field: int = 0
 
@@ -22,6 +23,7 @@ class RedactionStats:
             "phone": self.phone,
             "email": self.email,
             "bank_card": self.bank_card,
+            "medical_record": self.medical_record,
             "name_field": self.name_field,
             "address_field": self.address_field,
         }
@@ -193,6 +195,13 @@ def redact_sensitive_info(text: str) -> tuple[str, RedactionStats]:
         _bank_card_sub,
     )
     stats.bank_card = content.count("<BANK_CARD>") - _pre_bank
+    content, stats.medical_record = _replace_match_with_count(
+        re.compile(
+            r"((?:患者编号|病案号|住院号|门诊号|病例号|就诊号|检查号|样本号|申请单号|条码号?|编号)\s*[:：]?\s*)([A-Za-z0-9-]{6,})"
+        ),
+        content,
+        lambda m: f"{m.group(1)}<MEDICAL_RECORD>",
+    )
     # Field style replacement, e.g. "姓名: 张三".
     # Covers: 姓名、患者姓名、病史叙述者、送检医师、主管医师、责任护士、联系人、
     #          主治医师、经治医师、报告医师、审核医师、签名 etc.
@@ -236,6 +245,40 @@ def redact_sensitive_info(text: str) -> tuple[str, RedactionStats]:
         content,
         lambda m: f"{m.group(1)}: <ADDRESS>",
     )
+
+    ocr_line_records = 0
+    ocr_line_names = 0
+    redacted_lines: list[str] = []
+    for raw_line in content.splitlines(keepends=True):
+        line_ending = ""
+        line = raw_line
+        if raw_line.endswith("\r\n"):
+            line = raw_line[:-2]
+            line_ending = "\r\n"
+        elif raw_line.endswith("\n") or raw_line.endswith("\r"):
+            line = raw_line[:-1]
+            line_ending = raw_line[-1]
+
+        if re.search(r"(?:^|\s)(?:男|女)(?:\s|$)|(?:^|\s)\d{1,3}岁(?:\s|$)", line):
+            line, record_count = _replace_match_with_count(
+                re.compile(r"^(\s*)([A-Za-z0-9-]{6,})(?=\s+[\u4e00-\u9fa5·]{2,4}(?:\s+(?:男|女|\d{1,3}岁)))"),
+                line,
+                lambda m: f"{m.group(1)}<MEDICAL_RECORD>",
+            )
+            ocr_line_records += record_count
+            line, name_count = _replace_match_with_count(
+                re.compile(r"(^|\s)([\u4e00-\u9fa5·]{2,4})(?=\s+(?:男|女)(?:\s|$)|\s+\d{1,3}岁(?:\s|$))"),
+                line,
+                lambda m: f"{m.group(1)}<NAME>",
+            )
+            ocr_line_names += name_count
+
+        redacted_lines.append(line + line_ending)
+
+    if ocr_line_records or ocr_line_names:
+        content = "".join(redacted_lines)
+        stats.medical_record += ocr_line_records
+        stats.name_field += ocr_line_names
     return content, stats
 
 
