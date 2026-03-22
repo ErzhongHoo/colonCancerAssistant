@@ -6205,30 +6205,111 @@
 
     function buildUploadPrivacyFacts(item) {
       const facts = [];
-      const originalFile = item.original_file || {};
       const imageRedaction = item.image_redaction || {};
-      const imagePreview = item.image_preview || {};
       const preview = Array.isArray(item.redaction_preview) ? item.redaction_preview : [];
-      const totalRedacted = sumRedaction(item);
-
-      facts.push(originalFile.saved ? "原始文件已落盘保存" : "原始文件未落盘保存");
+      const hasTextProtection = sumRedaction(item) > 0 || preview.length > 0;
 
       if (imageRedaction.masked_data_url) {
-        const boxCount = Number(imageRedaction.sensitive_box_count || 0);
-        facts.push(boxCount > 0 ? `图片预览使用打码图，遮挡 ${boxCount} 处` : "图片预览使用打码图");
+        facts.push("图片预览仅展示隐私处理后的内容");
       } else if (imageRedaction.reason === "no_sensitive_boxes") {
-        facts.push("图片未检出敏感区域，预览使用安全原图");
-      } else if (imageRedaction.reason && imageRedaction.reason !== "not_image") {
-        facts.push(`图片脱敏结果：${imageRedaction.reason}`);
+        facts.push("图片预览可安全展示");
       }
 
-      if (totalRedacted > 0) {
-        facts.push(`文本已脱敏 ${totalRedacted} 处`);
-      } else if (preview.length) {
-        facts.push("文本脱敏已执行");
+      if (hasTextProtection) {
+        facts.push("文本已完成隐私处理");
       }
 
       return facts;
+    }
+
+    function buildUploadPrivacyCard(item, options = {}) {
+      const { enableSourcePreview = true } = options;
+      const preview = Array.isArray(item.redaction_preview) ? item.redaction_preview : [];
+      const hasTextProtection = sumRedaction(item) > 0 || preview.length > 0;
+      const imageRedaction = item.image_redaction || {};
+      const hasImageRedaction = imageRedaction.available
+        || imageRedaction.reason === "no_sensitive_boxes"
+        || imageRedaction.reason === "ocr_failed";
+
+      if (!hasTextProtection && !hasImageRedaction) {
+        return null;
+      }
+
+      const sourceKey = sourceKeyFromUploadItem(item);
+      const isImageSource = sourceKindFromName(item.file) === "image";
+      const canPreviewImageSafely = Boolean(
+        enableSourcePreview
+        && sourceKey
+        && isImageSource
+        && (imageRedaction.masked_data_url || imageRedaction.reason === "no_sensitive_boxes")
+      );
+
+      const card = document.createElement("div");
+      card.className = "redact-card";
+
+      const title = document.createElement("div");
+      title.className = "redact-card-title";
+      title.textContent = "🛡️ 隐私处理结果";
+      card.appendChild(title);
+
+      const privacyFacts = buildUploadPrivacyFacts(item);
+      if (privacyFacts.length) {
+        const summary = document.createElement("div");
+        summary.className = "source-text-note";
+        summary.textContent = privacyFacts.join("；");
+        card.appendChild(summary);
+      }
+
+      if (canPreviewImageSafely) {
+        const actionRow = document.createElement("div");
+        actionRow.className = "upload-preview-actions";
+        const viewBtn = document.createElement("button");
+        viewBtn.type = "button";
+        viewBtn.className = "view-source-btn";
+        viewBtn.textContent = "查看预览";
+        viewBtn.addEventListener("click", () => {
+          openUploadItemSourcePreview(item);
+        });
+        actionRow.appendChild(viewBtn);
+
+        const hint = document.createElement("span");
+        hint.className = "upload-preview-hint";
+        hint.textContent = "打开后仅展示可安全查看的图片内容";
+        actionRow.appendChild(hint);
+        card.appendChild(actionRow);
+      }
+
+      if (imageRedaction.masked_data_url) {
+        const imgWrap = document.createElement("div");
+        imgWrap.className = "redact-img-wrap";
+        const maskedImg = document.createElement("img");
+        maskedImg.src = imageRedaction.masked_data_url;
+        maskedImg.alt = "隐私处理预览";
+        imgWrap.appendChild(maskedImg);
+
+        const badge = document.createElement("span");
+        badge.className = "redact-img-badge";
+        badge.textContent = "已隐私处理";
+        imgWrap.appendChild(badge);
+        card.appendChild(imgWrap);
+
+        imgWrap.classList.add("clickable-preview");
+        imgWrap.title = "点击查看图片预览";
+        maskedImg.title = "点击查看图片预览";
+        imgWrap.addEventListener("click", () => {
+          const currentSrc = String(maskedImg.currentSrc || maskedImg.src || "").trim();
+          openImageViewer(currentSrc, item.file || "上传图片", maskedImg.alt || item.file || "上传图片");
+        });
+      }
+
+      if (!imageRedaction.masked_data_url && imageRedaction.reason && !["not_image", "no_sensitive_boxes"].includes(imageRedaction.reason)) {
+        const note = document.createElement("div");
+        note.className = "source-text-note";
+        note.textContent = "图片预览暂不可用";
+        card.appendChild(note);
+      }
+
+      return card;
     }
 
     function renderFileResult(item) {
@@ -6237,195 +6318,11 @@
         const dateMsg = item.date_warning
           ? ` | 日期状态=未识别 (${item.date_warning})`
           : " | 日期状态=已识别";
-        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0} | ${formatOpenvikingStatus(item)}${dateMsg}${formatUploadTiming(item)}`;
+        li.textContent = `${item.file} | chunks=${item.chunks} | 事件=${item.timeline_events || 0} | ${formatOpenvikingStatus(item)}${dateMsg}${formatUploadTiming(item)}`;
 
-        // ── Redaction visualization card ──
-        const redaction = item.redaction || {};
-        const totalRedacted = sumRedaction(item);
-        const preview = Array.isArray(item.redaction_preview) ? item.redaction_preview : [];
-        const imageRedaction = item.image_redaction || {};
-        const hasImageRedaction = imageRedaction.available || imageRedaction.reason === "no_sensitive_boxes" || imageRedaction.reason === "ocr_failed";
-        const sourceKey = sourceKeyFromUploadItem(item);
-        const isImageSource = sourceKindFromName(item.file) === "image";
-
-        if (totalRedacted > 0 || preview.length || hasImageRedaction) {
-          const card = document.createElement("div");
-          card.className = "redact-card";
-
-          const title = document.createElement("div");
-          title.className = "redact-card-title";
-          title.textContent = totalRedacted > 0 ? `🛡️ 已脱敏 ${totalRedacted} 处敏感信息` : "🛡️ 隐私脱敏扫描完成";
-          card.appendChild(title);
-
-          const privacyFacts = buildUploadPrivacyFacts(item);
-          if (privacyFacts.length) {
-            const summary = document.createElement("div");
-            summary.className = "source-text-note";
-            summary.textContent = privacyFacts.join("；");
-            card.appendChild(summary);
-          }
-
-          const REDACT_LABELS = {
-            id_card: "身份证", phone: "手机号", email: "邮箱",
-            bank_card: "银行卡", medical_record: "病历号", name_field: "姓名", address_field: "地址"
-          };
-          const statsBar = document.createElement("div");
-          statsBar.className = "redact-stats";
-          Object.entries(REDACT_LABELS).forEach(([key, label]) => {
-            const n = Number(redaction[key] || 0);
-            const tag = document.createElement("span");
-            tag.className = `redact-stat redact-tag-${key}${n === 0 ? " zero" : ""}`;
-            tag.textContent = `${label} ×${n}`;
-            statsBar.appendChild(tag);
-          });
-          card.appendChild(statsBar);
-
-          if (!imageRedaction.available && imageRedaction.reason && imageRedaction.reason !== "not_image") {
-            const note = document.createElement("div");
-            note.className = "source-text-note";
-            note.textContent = `图片脱敏预览未生成：${imageRedaction.reason}`;
-            card.appendChild(note);
-          }
-
-          if (hasImageRedaction && imageRedaction.masked_data_url) {
-            const toggleBar = document.createElement("div");
-            toggleBar.className = "redact-toggle-bar";
-            const btnMasked = document.createElement("button");
-            btnMasked.className = "redact-toggle-btn active";
-            btnMasked.textContent = "🔒 打码后";
-            const btnOriginal = document.createElement("button");
-            btnOriginal.className = "redact-toggle-btn";
-            btnOriginal.textContent = "📄 原图";
-            toggleBar.appendChild(btnMasked);
-            toggleBar.appendChild(btnOriginal);
-            card.appendChild(toggleBar);
-
-            const imgWrap = document.createElement("div");
-            imgWrap.className = "redact-img-wrap";
-            const maskedImg = document.createElement("img");
-            maskedImg.src = imageRedaction.masked_data_url;
-            maskedImg.alt = "打码预览";
-            imgWrap.appendChild(maskedImg);
-            const boxCount = Number(imageRedaction.sensitive_box_count || 0);
-            if (boxCount > 0) {
-              const badge = document.createElement("span");
-              badge.className = "redact-img-badge";
-              badge.textContent = `已遮挡 ${boxCount} 处`;
-              imgWrap.appendChild(badge);
-            }
-            card.appendChild(imgWrap);
-
-            let originalDataUrl = null;
-            const uploadedFile = Array.from(selectedUploadFiles.values()).find(uf => uf.name === item.file);
-            if (uploadedFile) {
-              const reader = new FileReader();
-              reader.onload = () => { originalDataUrl = reader.result; };
-              reader.readAsDataURL(uploadedFile);
-            }
-            btnMasked.addEventListener("click", () => {
-              maskedImg.src = imageRedaction.masked_data_url;
-              btnMasked.classList.add("active");
-              btnOriginal.classList.remove("active");
-            });
-            btnOriginal.addEventListener("click", () => {
-              if (originalDataUrl) maskedImg.src = originalDataUrl;
-              btnOriginal.classList.add("active");
-              btnMasked.classList.remove("active");
-            });
-          }
-
-          const boxes = Array.isArray(imageRedaction.boxes) ? imageRedaction.boxes : [];
-          if (boxes.length) {
-            const REDACT_LABELS_INNER = {
-              id_card: "身份证", phone: "手机号", email: "邮箱",
-              bank_card: "银行卡", medical_record: "病历号", name_field: "姓名", address_field: "地址"
-            };
-            const boxDetails = document.createElement("details");
-            boxDetails.className = "slim";
-            const boxSummary = document.createElement("summary");
-            boxSummary.textContent = `查看 ${boxes.length} 个敏感区域详情`;
-            boxDetails.appendChild(boxSummary);
-            const boxUl = document.createElement("ul");
-            boxUl.className = "redact-box-list";
-            boxes.forEach((box) => {
-              const boxLi = document.createElement("li");
-              boxLi.className = "redact-box-item";
-              const types = Array.isArray(box.types) ? box.types : [];
-              types.forEach(t => {
-                const typeTag = document.createElement("span");
-                const tagKey = t === "name_field" ? "name_field" : t === "address_field" ? "address_field" : t;
-                typeTag.className = `redact-stat redact-tag-${tagKey}`;
-                typeTag.textContent = REDACT_LABELS_INNER[t] || t;
-                typeTag.style.fontSize = "10px";
-                typeTag.style.padding = "1px 6px";
-                boxLi.appendChild(typeTag);
-              });
-              const txt = document.createElement("span");
-              const rawText = String(box.text || "");
-              txt.textContent = rawText.length > 30 ? rawText.slice(0, 30) + "..." : rawText;
-              boxLi.appendChild(txt);
-              const coord = document.createElement("span");
-              coord.className = "redact-box-coord";
-              coord.textContent = `(${box.x1},${box.y1})→(${box.x2},${box.y2})`;
-              boxLi.appendChild(coord);
-              boxUl.appendChild(boxLi);
-            });
-            boxDetails.appendChild(boxUl);
-            card.appendChild(boxDetails);
-          }
-
-          if (preview.length) {
-            const textDetails = document.createElement("details");
-            textDetails.className = "slim";
-            const textSummary = document.createElement("summary");
-            textSummary.textContent = "查看文本脱敏位置";
-            textDetails.appendChild(textSummary);
-            const pre = document.createElement("div");
-            pre.className = "redact-text-preview";
-            const TOKEN_HL = {
-              "<ID_CARD>": "redact-hl-id_card",
-              "<PHONE>": "redact-hl-phone",
-              "<EMAIL>": "redact-hl-email",
-              "<BANK_CARD>": "redact-hl-bank_card",
-              "<MEDICAL_RECORD>": "redact-hl-bank_card",
-              "<NAME>": "redact-hl-name",
-              "<ADDRESS>": "redact-hl-address",
-            };
-            const TOKEN_DISPLAY = {
-              "<ID_CARD>": "[身份证已脱敏]",
-              "<PHONE>": "[手机号已脱敏]",
-              "<EMAIL>": "[邮箱已脱敏]",
-              "<BANK_CARD>": "[银行卡已脱敏]",
-              "<MEDICAL_RECORD>": "[病历号已脱敏]",
-              "<NAME>": "[姓名已脱敏]",
-              "<ADDRESS>": "[地址已脱敏]",
-            };
-            preview.forEach((line, idx) => {
-              if (idx > 0) pre.appendChild(document.createElement("br"));
-              let remaining = line;
-              const tokenPattern = /<(ID_CARD|PHONE|EMAIL|BANK_CARD|MEDICAL_RECORD|NAME|ADDRESS)>/g;
-              let match;
-              let lastIdx2 = 0;
-              while ((match = tokenPattern.exec(remaining)) !== null) {
-                if (match.index > lastIdx2) {
-                  pre.appendChild(document.createTextNode(remaining.slice(lastIdx2, match.index)));
-                }
-                const token = match[0];
-                const span = document.createElement("span");
-                span.className = TOKEN_HL[token] || "";
-                span.textContent = TOKEN_DISPLAY[token] || token;
-                pre.appendChild(span);
-                lastIdx2 = match.index + match[0].length;
-              }
-              if (lastIdx2 < remaining.length) {
-                pre.appendChild(document.createTextNode(remaining.slice(lastIdx2)));
-              }
-            });
-            textDetails.appendChild(pre);
-            card.appendChild(textDetails);
-          }
-
-          li.appendChild(card);
+        const privacyCard = buildUploadPrivacyCard(item);
+        if (privacyCard) {
+          li.appendChild(privacyCard);
         }
       } else {
         li.textContent = `${item.file} | 上传失败: ${item.error || "未知错误"}`;
@@ -6555,233 +6452,11 @@
         const dateMsg = item.date_detected
           ? ` | 日期=${item.timeline_date}(${item.timeline_date_source})`
           : " | 日期=未知";
-        li.textContent = `${item.file} | chunks=${item.chunks} | 脱敏=${sumRedaction(item)} | 事件=${item.timeline_events || 0} | ${formatOpenvikingStatus(item)}${dateMsg}${formatUploadTiming(item)}`;
+        li.textContent = `${item.file} | chunks=${item.chunks} | 事件=${item.timeline_events || 0} | ${formatOpenvikingStatus(item)}${dateMsg}${formatUploadTiming(item)}`;
 
-        // ── Redaction visualization card ──
-        const redaction = item.redaction || {};
-        const totalRedacted = sumRedaction(item);
-        const preview = Array.isArray(item.redaction_preview) ? item.redaction_preview : [];
-        const imageRedaction = item.image_redaction || {};
-        const hasImageRedaction = imageRedaction.available || imageRedaction.reason === "no_sensitive_boxes" || imageRedaction.reason === "ocr_failed";
-        const sourceKey = sourceKeyFromUploadItem(item);
-        const isImageSource = sourceKindFromName(item.file) === "image";
-
-        if (totalRedacted > 0 || preview.length || hasImageRedaction) {
-          const card = document.createElement("div");
-          card.className = "redact-card";
-
-          // Title
-          const title = document.createElement("div");
-          title.className = "redact-card-title";
-          title.textContent = totalRedacted > 0 ? `🛡️ 已脱敏 ${totalRedacted} 处敏感信息` : "🛡️ 隐私脱敏扫描完成";
-          card.appendChild(title);
-
-          const privacyFacts = buildUploadPrivacyFacts(item);
-          if (privacyFacts.length) {
-            const summary = document.createElement("div");
-            summary.className = "source-text-note";
-            summary.textContent = privacyFacts.join("；");
-            card.appendChild(summary);
-          }
-
-          if (sourceKey && isImageSource) {
-            const actionRow = document.createElement("div");
-            actionRow.className = "upload-preview-actions";
-            const viewBtn = document.createElement("button");
-            viewBtn.type = "button";
-            viewBtn.className = "view-source-btn";
-            viewBtn.textContent = "查看图片";
-            viewBtn.addEventListener("click", () => {
-              openUploadItemSourcePreview(item);
-            });
-            actionRow.appendChild(viewBtn);
-
-            const hint = document.createElement("span");
-            hint.className = "upload-preview-hint";
-            hint.textContent = imageRedaction.masked_data_url
-              ? "打开后展示脱敏图"
-              : "打开后展示原始图片";
-            actionRow.appendChild(hint);
-            card.appendChild(actionRow);
-          }
-
-          // Stats bar
-          const REDACT_LABELS = {
-            id_card: "身份证", phone: "手机号", email: "邮箱",
-            bank_card: "银行卡", medical_record: "病历号", name_field: "姓名", address_field: "地址"
-          };
-          const statsBar = document.createElement("div");
-          statsBar.className = "redact-stats";
-          Object.entries(REDACT_LABELS).forEach(([key, label]) => {
-            const n = Number(redaction[key] || 0);
-            const tag = document.createElement("span");
-            tag.className = `redact-stat redact-tag-${key}${n === 0 ? " zero" : ""}`;
-            tag.textContent = `${label} ×${n}`;
-            statsBar.appendChild(tag);
-          });
-          card.appendChild(statsBar);
-
-          if (!imageRedaction.available && imageRedaction.reason && imageRedaction.reason !== "not_image") {
-            const note = document.createElement("div");
-            note.className = "source-text-note";
-            note.textContent = `图片脱敏预览未生成：${imageRedaction.reason}`;
-            card.appendChild(note);
-          }
-
-          // Image toggle (original vs masked)
-          if (hasImageRedaction && imageRedaction.masked_data_url) {
-            const toggleBar = document.createElement("div");
-            toggleBar.className = "redact-toggle-bar";
-            const btnMasked = document.createElement("button");
-            btnMasked.className = "redact-toggle-btn active";
-            btnMasked.textContent = "🔒 打码后";
-            const btnOriginal = document.createElement("button");
-            btnOriginal.className = "redact-toggle-btn";
-            btnOriginal.textContent = "📄 原图";
-            toggleBar.appendChild(btnMasked);
-            toggleBar.appendChild(btnOriginal);
-            card.appendChild(toggleBar);
-
-            const imgWrap = document.createElement("div");
-            imgWrap.className = "redact-img-wrap";
-            const maskedImg = document.createElement("img");
-            maskedImg.src = imageRedaction.masked_data_url;
-            maskedImg.alt = "打码预览";
-            imgWrap.appendChild(maskedImg);
-            const boxCount = Number(imageRedaction.sensitive_box_count || 0);
-            if (boxCount > 0) {
-              const badge = document.createElement("span");
-              badge.className = "redact-img-badge";
-              badge.textContent = `已遮挡 ${boxCount} 处`;
-              imgWrap.appendChild(badge);
-            }
-            card.appendChild(imgWrap);
-            if (sourceKey) {
-              imgWrap.classList.add("clickable-preview");
-              imgWrap.title = "点击全屏查看图片";
-              maskedImg.title = "点击全屏查看图片";
-              imgWrap.addEventListener("click", () => {
-                const currentSrc = String(maskedImg.currentSrc || maskedImg.src || "").trim();
-                openImageViewer(currentSrc, item.file || "上传图片", maskedImg.alt || item.file || "上传图片");
-              });
-            }
-
-            // Build original image data URL from upload for toggle
-            let originalDataUrl = null;
-            const uploadedFile = Array.from(selectedUploadFiles.values()).find(uf => uf.name === item.file);
-            if (uploadedFile) {
-              const reader = new FileReader();
-              reader.onload = () => { originalDataUrl = reader.result; };
-              reader.readAsDataURL(uploadedFile);
-            }
-            let showingMasked = true;
-            btnMasked.addEventListener("click", () => {
-              maskedImg.src = imageRedaction.masked_data_url;
-              btnMasked.classList.add("active");
-              btnOriginal.classList.remove("active");
-              showingMasked = true;
-            });
-            btnOriginal.addEventListener("click", () => {
-              if (originalDataUrl) {
-                maskedImg.src = originalDataUrl;
-              }
-              btnOriginal.classList.add("active");
-              btnMasked.classList.remove("active");
-              showingMasked = false;
-            });
-          }
-
-          // Sensitive box detail list
-          const boxes = Array.isArray(imageRedaction.boxes) ? imageRedaction.boxes : [];
-          if (boxes.length) {
-            const boxDetails = document.createElement("details");
-            boxDetails.className = "slim";
-            const boxSummary = document.createElement("summary");
-            boxSummary.textContent = `查看 ${boxes.length} 个敏感区域详情`;
-            boxDetails.appendChild(boxSummary);
-            const boxUl = document.createElement("ul");
-            boxUl.className = "redact-box-list";
-            boxes.forEach((box, idx) => {
-              const boxLi = document.createElement("li");
-              boxLi.className = "redact-box-item";
-              const types = Array.isArray(box.types) ? box.types : [];
-              types.forEach(t => {
-                const typeTag = document.createElement("span");
-                const tagKey = t === "name_field" ? "name_field" : t === "address_field" ? "address_field" : t;
-                typeTag.className = `redact-stat redact-tag-${tagKey}`;
-                typeTag.textContent = REDACT_LABELS[t] || t;
-                typeTag.style.fontSize = "10px";
-                typeTag.style.padding = "1px 6px";
-                boxLi.appendChild(typeTag);
-              });
-              const txt = document.createElement("span");
-              const rawText = String(box.text || "");
-              txt.textContent = rawText.length > 30 ? rawText.slice(0, 30) + "..." : rawText;
-              boxLi.appendChild(txt);
-              const coord = document.createElement("span");
-              coord.className = "redact-box-coord";
-              coord.textContent = `(${box.x1},${box.y1})→(${box.x2},${box.y2})`;
-              boxLi.appendChild(coord);
-              boxUl.appendChild(boxLi);
-            });
-            boxDetails.appendChild(boxUl);
-            card.appendChild(boxDetails);
-          }
-
-          // Text redaction preview with colored highlights
-          if (preview.length) {
-            const textDetails = document.createElement("details");
-            textDetails.className = "slim";
-            const textSummary = document.createElement("summary");
-            textSummary.textContent = "查看文本脱敏位置";
-            textDetails.appendChild(textSummary);
-            const pre = document.createElement("div");
-            pre.className = "redact-text-preview";
-            const TOKEN_HL = {
-              "<ID_CARD>": "redact-hl-id_card",
-              "<PHONE>": "redact-hl-phone",
-              "<EMAIL>": "redact-hl-email",
-              "<BANK_CARD>": "redact-hl-bank_card",
-              "<MEDICAL_RECORD>": "redact-hl-bank_card",
-              "<NAME>": "redact-hl-name",
-              "<ADDRESS>": "redact-hl-address",
-            };
-            const TOKEN_DISPLAY = {
-              "<ID_CARD>": "[身份证已脱敏]",
-              "<PHONE>": "[手机号已脱敏]",
-              "<EMAIL>": "[邮箱已脱敏]",
-              "<BANK_CARD>": "[银行卡已脱敏]",
-              "<MEDICAL_RECORD>": "[病历号已脱敏]",
-              "<NAME>": "[姓名已脱敏]",
-              "<ADDRESS>": "[地址已脱敏]",
-            };
-            preview.forEach((line, idx) => {
-              if (idx > 0) pre.appendChild(document.createElement("br"));
-              // Split line by tokens and create highlighted spans
-              let remaining = line;
-              const tokenPattern = /<(ID_CARD|PHONE|EMAIL|BANK_CARD|MEDICAL_RECORD|NAME|ADDRESS)>/g;
-              let match;
-              let lastIdx = 0;
-              while ((match = tokenPattern.exec(remaining)) !== null) {
-                if (match.index > lastIdx) {
-                  pre.appendChild(document.createTextNode(remaining.slice(lastIdx, match.index)));
-                }
-                const token = match[0];
-                const span = document.createElement("span");
-                span.className = TOKEN_HL[token] || "";
-                span.textContent = TOKEN_DISPLAY[token] || token;
-                pre.appendChild(span);
-                lastIdx = match.index + match[0].length;
-              }
-              if (lastIdx < remaining.length) {
-                pre.appendChild(document.createTextNode(remaining.slice(lastIdx)));
-              }
-            });
-            textDetails.appendChild(pre);
-            card.appendChild(textDetails);
-          }
-
-          li.appendChild(card);
+        const privacyCard = buildUploadPrivacyCard(item);
+        if (privacyCard) {
+          li.appendChild(privacyCard);
         }
       } else {
         li.textContent = `${item.file} | 上传失败: ${item.error || "未知错误"}`;
