@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
+from app.llm import get_embedding_provider
 
 try:
     from openviking import SyncOpenViking
@@ -109,6 +110,11 @@ def _build_native_config(path: Path) -> dict[str, Any]:
 def _get_native_client() -> Any | None:
     global _NATIVE_CLIENT, _NATIVE_INIT_ERROR
     if not _env_flag("OPENVIKING_NATIVE_ENABLED", "true"):
+        return None
+    # OpenViking native ingest currently depends on remote embedding providers.
+    # If the app switches to a local embedding model, use the legacy in-process
+    # layered store and retrieval path instead.
+    if get_embedding_provider() == "local":
         return None
     if SyncOpenViking is None or OpenVikingConfigSingleton is None:
         return None

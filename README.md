@@ -200,7 +200,14 @@ cp .env.example .env
 | `BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | API 基础 URL |
 | `CHAT_MODEL` | `qwen-plus` | 对话模型 |
 | `VISION_MODEL` | `qwen-vl-max` | 多模态视觉模型 |
+| `EMBEDDING_PROVIDER` | `remote` | 向量嵌入来源：`remote` / `local` |
 | `EMBEDDING_MODEL` | `text-embedding-v3` | 向量嵌入模型 |
+| `LOCAL_EMBEDDING_MODEL` | `BAAI/bge-small-zh-v1.5` | 本地 embedding 模型；可填 Hugging Face 仓库名或本地目录，离线环境建议直接填本地目录 |
+| `LOCAL_EMBEDDING_DEVICE` | `cpu` | 本地 embedding 设备，如 `cpu` / `cuda` |
+| `LOCAL_EMBEDDING_NORMALIZE` | `true` | 本地向量是否归一化 |
+| `LOCAL_EMBEDDING_CACHE_DIR` | 空 | 本地 embedding 模型缓存目录（可选） |
+| `LOCAL_EMBEDDING_LOCAL_ONLY` | `false` | 仅从本地磁盘加载模型，不访问 Hugging Face |
+| `LOCAL_EMBEDDING_TRUST_REMOTE_CODE` | `false` | 是否允许加载模型仓库中的自定义代码；只有模型明确要求时再开启 |
 
 #### 📷 OCR 配置
 
@@ -251,6 +258,8 @@ cp .env.example .env
 | `OPENVIKING_INTERNAL_COMPLEX_SEARCH` | `false` | 内部库复杂问题是否启用 `search` |
 | `OPENVIKING_LEGACY_DUAL_WRITE` | `false` | 是否同时写入旧版存储 |
 
+> **本地 embedding 注意**：当 `EMBEDDING_PROVIDER=local` 时，系统会自动停用 OpenViking 原生索引，回退到项目内置的本地分层检索路径，因此不再依赖阿里云 embedding 配额。
+
 #### 📚 文献 Agent 配置
 
 | 变量 | 默认值 | 说明 |
@@ -284,7 +293,14 @@ JWT_SECRET=your_strong_random_secret_here
 # ==================== 模型 ====================
 CHAT_MODEL=qwen-plus
 VISION_MODEL=qwen-vl-max
+EMBEDDING_PROVIDER=remote
 EMBEDDING_MODEL=text-embedding-v3
+LOCAL_EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+LOCAL_EMBEDDING_DEVICE=cpu
+LOCAL_EMBEDDING_NORMALIZE=true
+LOCAL_EMBEDDING_CACHE_DIR=
+LOCAL_EMBEDDING_LOCAL_ONLY=false
+LOCAL_EMBEDDING_TRUST_REMOTE_CODE=false
 
 # ==================== OCR ====================
 OCR_PROVIDER=auto
@@ -306,6 +322,69 @@ LITERATURE_MEDICAL_ONCOLOGY_ONLY=true
 # ==================== 认证 ====================
 JWT_EXPIRE_SECONDS=604800
 ```
+
+### 切换到本地 Embedding
+
+1. 安装本地 embedding 依赖：
+
+```bash
+uv pip install --python .venv/bin/python sentence-transformers
+```
+
+或：
+
+```bash
+pip install sentence-transformers
+```
+
+2. 准备本地模型目录。模型不要求放在项目目录里，只要进程可读即可；推荐放在独立目录，例如 `/opt/models/...`、`/data/models/...` 或你的家目录下。
+
+如果你用 `hf` 下载并希望放在固定目录，推荐这样做：
+
+```bash
+hf download BAAI/bge-small-zh-v1.5 --local-dir /opt/models/bge-small-zh-v1.5
+```
+
+如果你已经用 `hf` 下载到了默认缓存，也可以直接复用 Hugging Face 缓存目录；`LOCAL_EMBEDDING_MODEL` 需要指向 `snapshots/<hash>` 这一层，而不是 `models--...` 根目录，例如：
+
+```text
+~/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots/<snapshot-id>
+```
+
+3. 在 `.env` 中设置。离线环境建议直接填本地目录，并开启 `LOCAL_EMBEDDING_LOCAL_ONLY=true`：
+
+```env
+EMBEDDING_PROVIDER=local
+LOCAL_EMBEDDING_MODEL=/opt/models/bge-small-zh-v1.5
+LOCAL_EMBEDDING_DEVICE=cpu
+LOCAL_EMBEDDING_NORMALIZE=true
+LOCAL_EMBEDDING_LOCAL_ONLY=true
+LOCAL_EMBEDDING_TRUST_REMOTE_CODE=false
+```
+
+如果你直接复用 HF 缓存，写法类似：
+
+```env
+LOCAL_EMBEDDING_MODEL=/home/your-user/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots/<snapshot-id>
+```
+
+4. 重启服务。
+
+5. 重新导入内部指南，并重新上传需要检索的资料。
+
+这是必要步骤，因为旧索引里的向量仍然是按原来的 embedding 生成的。`/admin` 页面上传文件只会把原件保存到内部指南目录；真正重建向量索引需要再点一次“立即同步知识库”。
+
+6. 验证是否切换成功。
+
+常见验证方式：
+
+- 启动日志里不再出现对阿里云 embedding 接口的请求。
+- `LOCAL_EMBEDDING_LOCAL_ONLY=true` 时，不再尝试访问 Hugging Face。
+- `/admin` 同步完成后，日志里会出现 `文件名: N chunks (OK)`，说明内部指南已经重新切片并入库。
+
+> 切到本地 embedding 后，问答和 OCR 仍然可以继续使用阿里云模型；变化的只是向量生成这一步。
+
+> 如果你看到 `Network is unreachable` 且日志里还在访问 `https://huggingface.co/...`，通常说明 `LOCAL_EMBEDDING_MODEL` 填的是仓库名而不是本地目录，或者目录指到了 `models--...` 根目录而不是 `snapshots/<hash>`。
 
 > 💡 **生成安全的 JWT 密钥**：
 > ```bash

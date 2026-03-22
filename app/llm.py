@@ -4,9 +4,22 @@ import base64
 import json
 import os
 import re
+import threading
 from pathlib import Path
 
 from openai import OpenAI
+
+
+_LOCAL_EMBEDDER = None
+_LOCAL_EMBEDDER_KEY = ""
+_LOCAL_EMBEDDER_LOCK = threading.Lock()
+
+
+def get_embedding_provider() -> str:
+    raw = os.getenv("EMBEDDING_PROVIDER", "remote").strip().lower()
+    if raw in {"local", "sentence-transformers", "sentence_transformers", "st"}:
+        return "local"
+    return "remote"
 
 
 def _pick_api_key() -> str:
@@ -30,8 +43,81 @@ def build_client() -> OpenAI:
 
 
 def embed_text(client: OpenAI, model: str, text: str) -> list[float]:
+    if get_embedding_provider() == "local":
+        embedder = _get_local_embedder()
+        normalize = os.getenv("LOCAL_EMBEDDING_NORMALIZE", "true").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        vector = embedder.encode(
+            text,
+            convert_to_numpy=True,
+            normalize_embeddings=normalize,
+            show_progress_bar=False,
+        )
+        return vector.tolist()
     resp = client.embeddings.create(model=model, input=text)
     return list(resp.data[0].embedding)
+
+
+def _get_local_embedder():
+    global _LOCAL_EMBEDDER, _LOCAL_EMBEDDER_KEY
+    model_name = os.getenv("LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5").strip()
+    device = os.getenv("LOCAL_EMBEDDING_DEVICE", "cpu").strip() or "cpu"
+    cache_dir = os.getenv("LOCAL_EMBEDDING_CACHE_DIR", "").strip()
+    local_files_only = os.getenv("LOCAL_EMBEDDING_LOCAL_ONLY", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    trust_remote_code = os.getenv("LOCAL_EMBEDDING_TRUST_REMOTE_CODE", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    cache_key = (
+        f"{model_name}::{device}::{cache_dir}::{int(local_files_only)}::{int(trust_remote_code)}"
+    )
+    if _LOCAL_EMBEDDER is not None and _LOCAL_EMBEDDER_KEY == cache_key:
+        return _LOCAL_EMBEDDER
+
+    with _LOCAL_EMBEDDER_LOCK:
+        if _LOCAL_EMBEDDER is not None and _LOCAL_EMBEDDER_KEY == cache_key:
+            return _LOCAL_EMBEDDER
+        try:
+            from sentence_transformers import SentenceTransformer
+        except Exception as exc:
+            raise RuntimeError(
+                "EMBEDDING_PROVIDER=local 但未安装 sentence-transformers。"
+                "请执行: uv pip install sentence-transformers 或 pip install sentence-transformers"
+            ) from exc
+
+        kwargs: dict[str, object] = {
+            "device": device,
+            "local_files_only": local_files_only,
+            "trust_remote_code": trust_remote_code,
+        }
+        if cache_dir:
+            kwargs["cache_folder"] = cache_dir
+        try:
+            _LOCAL_EMBEDDER = SentenceTransformer(model_name, **kwargs)
+        except Exception as exc:
+            if local_files_only:
+                raise RuntimeError(
+                    "本地 embedding 模型未找到。请确认 LOCAL_EMBEDDING_MODEL 指向本地目录，"
+                    "或先把 Hugging Face 模型完整下载到本机。"
+                ) from exc
+            raise RuntimeError(
+                "本地 embedding 模型加载失败。当前配置会尝试从 Hugging Face 拉取模型；"
+                "如果当前环境无法联网，请把 LOCAL_EMBEDDING_MODEL 改成本地目录，"
+                "并设置 LOCAL_EMBEDDING_LOCAL_ONLY=true。"
+            ) from exc
+        _LOCAL_EMBEDDER_KEY = cache_key
+        return _LOCAL_EMBEDDER
 
 
 def _vision_extract(client: OpenAI, model: str, data_url: str, prompt_text: str) -> str:
